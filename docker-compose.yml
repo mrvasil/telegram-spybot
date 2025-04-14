@@ -1,0 +1,13 @@
+version: '3'
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./media:/app/media
+      - ./messages.db:/app/messages.db
+    env_file:
+      - .env
+    restart: unless-stopped

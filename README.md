@@ -9,24 +9,26 @@
 git clone https://github.com/talyamm/telegram-spybot.git
 cd telegram-spybot
 ```
-
-2. Установить зависимости
-```bash
-pip install -r requirements.txt
+2. Создать файл `.env`:
 ```
-
-3. Создать файл `.env`:
-```
-TOKEN=токен_бота
-USER_ID=ваш_телеграм_id
+TOKEN=
+USER_ID=
 MESSAGES_LIFETIME=24
 CLEANUP_INTERVAL=3600
 ```
 
-### Запуск бота
+### Вариант 1: Запустить через Docker Compose
+```bash
+docker-compose up -d
+```
+### Вариант 2: Стандартный запуск
 
+1. Установить зависимости
+```bash
+pip install -r requirements.txt
+```
+
+2. Запустить бота
 ```bash
 python main.py
 ```
-
-Всё медиа сохраняется в `media/`.
