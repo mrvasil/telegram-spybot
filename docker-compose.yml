@@ -5,6 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: telegram-spybot
     volumes:
       - ./media:/app/media
       - ./messages.db:/app/messages.db
