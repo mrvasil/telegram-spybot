@@ -1,6 +1,6 @@
 import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiogram import types
 
 class Database:
@@ -21,6 +21,7 @@ class Database:
             text TEXT,
             date TEXT,
             media_path TEXT,
+            created_at TEXT,
             PRIMARY KEY (chat_id, message_id)
         )
         ''')
@@ -61,8 +62,10 @@ class Database:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             media_path = f"media/{timestamp}_{media_type}"
         
+        created_at = datetime.now().isoformat()
+        
         cursor.execute(
-            "INSERT OR REPLACE INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 message.chat.id,
                 message.message_id,
@@ -70,7 +73,8 @@ class Database:
                 message.from_user.username if message.from_user else None,
                 message.text or message.caption or "",
                 message.date.isoformat(),
-                media_path
+                media_path,
+                created_at
             )
         )
         
@@ -101,7 +105,8 @@ class Database:
             "username": row[3],
             "text": row[4],
             "date": row[5],
-            "media_path": row[6]
+            "media_path": row[6],
+            "created_at": row[7]
         }
         
     def delete_message(self, chat_id, message_id):
@@ -128,3 +133,28 @@ class Database:
             os.remove(media_path)
         
         return media_path
+        
+    def cleanup_old_messages(self, hours=24):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cutoff_time = (datetime.now() - timedelta(hours=hours)).isoformat()
+        
+        cursor.execute("SELECT chat_id, message_id, media_path FROM messages WHERE created_at < ?", (cutoff_time,))
+        old_messages = cursor.fetchall()
+        
+        deleted_count = 0
+        for chat_id, message_id, media_path in old_messages:
+            if media_path and os.path.exists(media_path):
+                try:
+                    os.remove(media_path)
+                except:
+                    pass
+            
+            cursor.execute("DELETE FROM messages WHERE chat_id = ? AND message_id = ?", (chat_id, message_id))
+            deleted_count += 1
+        
+        conn.commit()
+        conn.close()
+        
+        return deleted_count

@@ -1,12 +1,12 @@
 # Telegram Spy Bot
 
-Телеграм бот для отслеживания удленных и изменения сообщений в лс.
+Телеграм бот для отслеживания удаленных и измененных сообщений в лс.
 
 ## Установка и запуск
 
 1. Клонировать репозиторий
 ```bash
-git clone https://github.com/username/telegram-spybot.git
+git clone https://github.com/talyamm/telegram-spybot.git
 cd telegram-spybot
 ```
 
@@ -17,8 +17,10 @@ pip install -r requirements.txt
 
 3. Создать файл `.env`:
 ```
-TOKEN=окен_бота
-USER_ID=телеграм_id
+TOKEN=токен_бота
+USER_ID=ваш_телеграм_id
+MESSAGES_LIFETIME=24
+CLEANUP_INTERVAL=3600
 ```
 
 ### Запуск бота

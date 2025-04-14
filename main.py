@@ -1,6 +1,8 @@
 from aiogram import Bot, Dispatcher, types
 from dotenv import load_dotenv
 import os
+import asyncio
+from datetime import datetime
 
 from database import Database
 from media import download_media
@@ -11,6 +13,10 @@ bot = Bot(token=os.getenv("TOKEN"))
 dp = Dispatcher()
 
 db = Database()
+
+
+MESSAGES_LIFETIME = int(os.getenv("MESSAGES_LIFETIME", 24)) #часы
+CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 3600)) #секунды
 
 async def save_message(message: types.Message):
     media_path, file_id = await db.save_message(message)
@@ -49,7 +55,7 @@ async def deleted_message(business_messages: types.BusinessMessagesDeleted):
             continue
 
         text = f"🗑️ @{old_message['username']} (ID: {old_message['user_id']}) deleted message:\n\n{old_message['text']}"
-
+        
         if old_message['media_path'] and os.path.exists(old_message['media_path']):
             media_path = old_message['media_path']
             
@@ -57,31 +63,36 @@ async def deleted_message(business_messages: types.BusinessMessagesDeleted):
                 await bot.send_photo(
                     chat_id=os.getenv("USER_ID"),
                     photo=types.FSInputFile(media_path),
-                    caption=text
+                    caption=text,
+                    show_caption_above_media=True
                 )
             elif '_video' in media_path:
                 await bot.send_video(
                     chat_id=os.getenv("USER_ID"),
                     video=types.FSInputFile(media_path),
-                    caption=text
+                    caption=text,
+                    show_caption_above_media=True
                 )
             elif '_voice' in media_path:
                 await bot.send_voice(
                     chat_id=os.getenv("USER_ID"),
                     voice=types.FSInputFile(media_path),
-                    caption=text
+                    caption=text,
+                    show_caption_above_media=True
                 )
             elif '_audio' in media_path:
                 await bot.send_audio(
                     chat_id=os.getenv("USER_ID"),
                     audio=types.FSInputFile(media_path),
-                    caption=text
+                    caption=text,
+                    show_caption_above_media=True
                 )
             elif '_document' in media_path:
                 await bot.send_document(
                     chat_id=os.getenv("USER_ID"),
                     document=types.FSInputFile(media_path),
-                    caption=text
+                    caption=text,
+                    show_caption_above_media=True
                 )
         else:
             await bot.send_message(
@@ -91,7 +102,22 @@ async def deleted_message(business_messages: types.BusinessMessagesDeleted):
             
         db.delete_message(business_messages.chat.id, message_id)
 
+async def cleanup_messages():
+    while True:
+        deleted_count = db.cleanup_old_messages(hours=MESSAGES_LIFETIME)
+        print(f"{datetime.now()}: Удалено {deleted_count} старых сообщений")
+
+        await asyncio.sleep(CLEANUP_INTERVAL)
+
+async def on_startup():
+    deleted_count = db.cleanup_old_messages(hours=MESSAGES_LIFETIME)
+    print(f"Удалено {deleted_count} старых сообщений")
+
+    asyncio.create_task(cleanup_messages())
+
 if __name__ == "__main__":
+    dp.startup.register(on_startup)
+    
     dp.run_polling(
         bot,
         allowed_updates=[
