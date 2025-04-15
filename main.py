@@ -31,6 +31,9 @@ def format_as_quote(text: str) -> str:
     return '\n'.join(f'> {line}' if line.strip() else '>' for line in lines)
 
 async def save_message(message: types.Message):
+    if str(message.from_user.id) == os.getenv("USER_ID"):
+        return
+        
     saved_media = await db.save_message(message)
     
     for media_path, file_id in saved_media:
@@ -42,9 +45,11 @@ async def message(message: types.Message):
 
 @dp.edited_business_message()
 async def edited_message(message: types.Message):
-    old_message = db.get_message(message.chat.id, message.message_id)
-    await save_message(message)
+    if str(message.from_user.id) == os.getenv("USER_ID"):
+        return
 
+    old_message = db.get_message(message.chat.id, message.message_id)
+        
     if not old_message:
         return
 
@@ -58,21 +63,25 @@ async def edited_message(message: types.Message):
         text=text,
         parse_mode="MarkdownV2"
     )
+    
+    await save_message(message)
 
 @dp.deleted_business_messages()
 async def deleted_message(business_messages: types.BusinessMessagesDeleted):
     for message_id in business_messages.message_ids:
         old_message = db.get_message(business_messages.chat.id, message_id)
         
-        if not old_message:
+        if not old_message or str(old_message['user_id']) == os.getenv("USER_ID"):
             continue
 
         text = f"🗑️ @{escape_markdown(old_message['username'])} \\(ID: {old_message['user_id']}\\) deleted message:\n\n{format_as_quote(escape_markdown(old_message['text']))}"
         
         if old_message['media_files']:
             sent_text = False
-            for media_type, media_path in old_message['media_files']:
-                if not os.path.exists(media_path):
+            sticker_message = None
+            
+            for media_type, media_path, file_id in old_message['media_files']:
+                if media_type != "sticker" and not os.path.exists(media_path):
                     continue
                     
                 if media_type == "photo":
@@ -91,6 +100,18 @@ async def deleted_message(business_messages: types.BusinessMessagesDeleted):
                         parse_mode="MarkdownV2",
                         show_caption_above_media=True
                     )
+                elif media_type == "video_note":
+                    video_note_message = await bot.send_video_note(
+                        chat_id=os.getenv("USER_ID"),
+                        video_note=types.FSInputFile(media_path)
+                    )
+                    await bot.send_message(
+                        chat_id=os.getenv("USER_ID"),
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_to_message_id=video_note_message.message_id
+                    )
+                    sent_text = True
                 elif media_type == "voice":
                     await bot.send_voice(
                         chat_id=os.getenv("USER_ID"),
@@ -107,15 +128,36 @@ async def deleted_message(business_messages: types.BusinessMessagesDeleted):
                         parse_mode="MarkdownV2",
                         show_caption_above_media=True
                     )
+                elif media_type == "animation":
+                    await bot.send_animation(
+                        chat_id=os.getenv("USER_ID"),
+                        animation=file_id,
+                        caption=text if not sent_text else None,
+                        parse_mode="MarkdownV2",
+                        show_caption_above_media=True
+                    )
                 elif media_type == "document":
                     await bot.send_document(
                         chat_id=os.getenv("USER_ID"),
                         document=types.FSInputFile(media_path),
                         caption=text if not sent_text else None,
-                        parse_mode="MarkdownV2",
-                        show_caption_above_media=True
+                        parse_mode="MarkdownV2"
                     )
+                elif media_type == "sticker":
+                    sticker_message = await bot.send_sticker(
+                        chat_id=os.getenv("USER_ID"),
+                        sticker=file_id
+                    )
+                    continue
                 sent_text = True
+                
+            if sticker_message:
+                await bot.send_message(
+                    chat_id=os.getenv("USER_ID"),
+                    text=text,
+                    parse_mode="MarkdownV2",
+                    reply_to_message_id=sticker_message.message_id
+                )
         else:
             await bot.send_message(
                 chat_id=os.getenv("USER_ID"),

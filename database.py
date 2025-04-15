@@ -3,6 +3,26 @@ import os
 from datetime import datetime, timedelta
 from aiogram import types
 
+def get_extension_from_mime(mime_type: str) -> str:
+    mime_to_ext = {
+        'image/jpeg': '.jpg',
+        'image/png': '.png',
+        'image/gif': '.gif',
+        'video/mp4': '.mp4',
+        'audio/mpeg': '.mp3',
+        'audio/ogg': '.ogg',
+        'application/pdf': '.pdf'
+    }
+    return mime_to_ext.get(mime_type, '')
+    
+def get_file_extension(file_name: str) -> str:
+    if not file_name:
+        return ''
+    parts = file_name.rsplit('.', 1)
+    if len(parts) > 1:
+        return f".{parts[1].lower()}"
+    return ''
+
 class Database:
     def __init__(self, db_path="messages.db"):
         self.db_path = db_path
@@ -49,18 +69,32 @@ class Database:
         if message.photo:
             if message.media_group_id:
                 largest_photo = message.photo[-1]
-                media_files.append(("photo", largest_photo.file_id, message.media_group_id))
+                media_files.append(("photo", largest_photo.file_id, message.media_group_id, '.jpg'))
             else:
                 largest_photo = message.photo[-1]
-                media_files.append(("photo", largest_photo.file_id, 0))
+                media_files.append(("photo", largest_photo.file_id, 0, '.jpg'))
         if message.video:
-            media_files.append(("video", message.video.file_id, 0))
+            ext = get_extension_from_mime(message.video.mime_type) or get_file_extension(message.video.file_name) or '.mp4'
+            media_files.append(("video", message.video.file_id, 0, ext))
+        if message.video_note:
+            media_files.append(("video_note", message.video_note.file_id, 0, '.mp4'))
         if message.voice:
-            media_files.append(("voice", message.voice.file_id, 0))
+            ext = get_extension_from_mime(message.voice.mime_type) or '.ogg'
+            media_files.append(("voice", message.voice.file_id, 0, ext))
         if message.audio:
-            media_files.append(("audio", message.audio.file_id, 0))
-        if message.document:
-            media_files.append(("document", message.document.file_id, 0))
+            ext = get_extension_from_mime(message.audio.mime_type) or get_file_extension(message.audio.file_name) or '.mp3'
+            media_files.append(("audio", message.audio.file_id, 0, ext))
+        if message.animation:
+            ext = get_extension_from_mime(message.animation.mime_type) or '.gif'
+            media_files.append(("animation", message.animation.file_id, 0, ext))
+        if message.document and not message.animation:
+            if message.document.mime_type == 'image/gif':
+                media_files.append(("animation", message.document.file_id, 0, '.gif'))
+            else:
+                ext = get_extension_from_mime(message.document.mime_type) or get_file_extension(message.document.file_name) or ''
+                media_files.append(("document", message.document.file_id, 0, ext))
+        if message.sticker:
+            media_files.append(("sticker", message.sticker.file_id, 0, '.webp'))
             
         created_at = datetime.now().isoformat()
         
@@ -71,19 +105,19 @@ class Database:
                 message.message_id,
                 message.from_user.id if message.from_user else None,
                 message.from_user.username if message.from_user else None,
-                message.text or message.caption or "",
+                message.caption or message.text or ("*стикер*" if message.sticker else "*кружок*" if message.video_note else ""),
                 message.date.isoformat(),
                 created_at
             )
         )
         
         saved_media = []
-        for media_type, file_id, group_id in media_files:
+        for media_type, file_id, group_id, extension in media_files:
             if not os.path.exists("media"):
                 os.makedirs("media")
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            media_path = f"media/{timestamp}_{media_type}_{group_id}"
+            media_path = f"media/{timestamp}_{media_type}_{group_id}{extension}"
             
             cursor.execute(
                 "INSERT INTO media_files (chat_id, message_id, file_id, media_type, media_path) VALUES (?, ?, ?, ?, ?)",
@@ -111,7 +145,7 @@ class Database:
             return None
             
         cursor.execute(
-            "SELECT media_type, media_path FROM media_files WHERE chat_id = ? AND message_id = ?",
+            "SELECT media_type, media_path, file_id FROM media_files WHERE chat_id = ? AND message_id = ?",
             (chat_id, message_id)
         )
         
