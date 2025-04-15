@@ -1,14 +1,22 @@
-version: '3'
+version: '3.8'
 
 services:
-  bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: telegram-spybot
-    volumes:
-      - ./media:/app/media
-      - ./messages.db:/app/messages.db
+  telegram-spybot:
+    build: .
+    restart: always
     env_file:
       - .env
-    restart: unless-stopped
+    volumes:
+      - media-volume:/app/media
+      - db-volume:/app
+    environment:
+      - TOKEN=${TOKEN}
+      - USER_ID=${USER_ID}
+      - MESSAGES_LIFETIME=${MESSAGES_LIFETIME:-24}
+      - CLEANUP_INTERVAL=${CLEANUP_INTERVAL:-3600}
+
+volumes:
+  media-volume:
+    name: telegram-spybot-media
+  db-volume:
+    name: telegram-spybot-db
