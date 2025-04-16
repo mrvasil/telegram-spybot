@@ -5,7 +5,7 @@
 ## Быстрая установка
 
 ```bash
-git clone https://github.com/talyamm/telegram-spybot.git && cd telegram-spybot && chmod +x setup.sh && ./setup.sh
+git clone https://github.com/talyamm/telegram-spybot.git && cd telegram-spybot && sudo chmod +x setup.sh && ./setup.sh
 ```
  
 ## Ручная установка
