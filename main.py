@@ -39,6 +39,26 @@ async def save_message(message: types.Message):
     for media_path, file_id in saved_media:
         await download_media(bot, file_id, media_path)
 
+@dp.message()
+async def start_command(message: types.Message):
+    if message.from_user.id == os.getenv("USER_ID"):
+        return
+        
+    if not message.from_user.is_premium:
+        await message.answer("_Для использования бота необходим Telegram Premium_", parse_mode="MarkdownV2")
+        return
+        
+    if message.text == "/start":
+        await message.answer(
+            "Чтобы подключить бота:\n"
+            "1. Откройте настройки Telegram Business\n"
+            "2. Перейдите в раздел 'Боты для бизнеса'\n"
+            "3. Нажмите 'Подключить бота'\n"
+            "4. Введите username своего бота\n\n"
+        )
+    else:
+        await save_message(message)
+
 @dp.business_message()
 async def message(message: types.Message):
     await save_message(message)
@@ -167,6 +187,19 @@ async def deleted_message(business_messages: types.BusinessMessagesDeleted):
             
         db.delete_message(business_messages.chat.id, message_id)
 
+@dp.business_connection()
+async def on_business_connection(event: types.BusinessConnection):
+    if event.is_enabled:
+        await bot.send_message(
+            chat_id=event.user.id,
+            text="Бот успешно подключен к Telegram Business!"
+        )
+    else:
+        await bot.send_message(
+            chat_id=event.user.id,
+            text="Бот отключен от Telegram Business."
+        )
+
 async def cleanup_messages():
     while True:
         deleted_count = db.cleanup_old_messages(hours=MESSAGES_LIFETIME)
@@ -186,8 +219,10 @@ if __name__ == "__main__":
     dp.run_polling(
         bot,
         allowed_updates=[
+            "message",
             "business_message",
             "edited_business_message",
             "deleted_business_messages",
+            "business_connection"
         ],
     )
