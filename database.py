@@ -56,6 +56,16 @@ class Database:
             FOREIGN KEY (chat_id, message_id) REFERENCES messages (chat_id, message_id) ON DELETE CASCADE
         )
         ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value INTEGER
+        )
+        ''')
+
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_edited', 1)")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_deleted', 1)")
         
         conn.commit()
         conn.close()
@@ -216,3 +226,48 @@ class Database:
         conn.close()
         
         return deleted_count
+
+    def get_stats(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM messages")
+        total_messages = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM media_files")
+        total_media = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT created_at FROM messages ORDER BY created_at DESC LIMIT 1")
+        last_message = cursor.fetchone()
+        last_message_time = last_message[0] if last_message else None
+        
+        conn.close()
+        
+        return {
+            "total_messages": total_messages,
+            "total_media": total_media,
+            "last_message_time": last_message_time
+        }
+
+    def get_settings(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT key, value FROM settings")
+        settings = dict(cursor.fetchall())
+        
+        conn.close()
+        
+        return {
+            "notify_edited": bool(settings.get("notify_edited", 1)),
+            "notify_deleted": bool(settings.get("notify_deleted", 1))
+        }
+
+    def toggle_setting(self, key: str):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("UPDATE settings SET value = 1 - value WHERE key = ?", (key,))
+        
+        conn.commit()
+        conn.close()

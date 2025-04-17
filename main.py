@@ -1,8 +1,9 @@
 from aiogram import Bot, Dispatcher, types
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 import os
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 
 from database import Database
@@ -17,12 +18,6 @@ db = Database()
 
 MESSAGES_LIFETIME = int(os.getenv("MESSAGES_LIFETIME", 24)) #часы
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 3600)) #секунды
-
-def escape_markdown(text: str) -> str:
-    if not text:
-        return ""
-    characters = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    return re.sub(f"([{''.join(map(re.escape, characters))}])", r'\\\1', text)
 
 def format_as_quote(text: str) -> str:
     if not text:
@@ -41,7 +36,7 @@ async def save_message(message: types.Message):
 
 @dp.message()
 async def start_command(message: types.Message):
-    if message.from_user.id == os.getenv("USER_ID"):
+    if str(message.from_user.id) != os.getenv("USER_ID"):
         return
         
     if not message.from_user.is_premium:
@@ -50,14 +45,78 @@ async def start_command(message: types.Message):
         
     if message.text == "/start":
         await message.answer(
-            "Чтобы подключить бота:\n"
-            "1. Откройте настройки Telegram Business\n"
-            "2. Перейдите в раздел 'Боты для бизнеса'\n"
-            "3. Нажмите 'Подключить бота'\n"
-            "4. Введите username своего бота\n\n"
+            "Напишите любое сообщение, чтобы посмотреть статус бота"
         )
     else:
-        await save_message(message)
+        stats = db.get_stats()
+        settings = db.get_settings()
+        next_cleanup = datetime.now() + timedelta(seconds=CLEANUP_INTERVAL)
+        
+        status_text = (
+            "*Статус бота:*\n\n"
+            f"Сохранено сообщений: *{stats['total_messages']}*\n"
+            f"Медиафайлов: *{stats['total_media']}*\n"
+            f"Следующая очистка через: *{(next_cleanup - datetime.now()).seconds // 60} мин*\n\n"
+            "*Настройки:*"
+        )
+
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text=f"Изменённые: {'🟢 ON' if settings['notify_edited'] else '🔴 OFF'}", 
+            callback_data="toggle_edited"
+        )
+        builder.button(
+            text=f"Удалённые: {'🟢 ON' if settings['notify_deleted'] else '🔴 OFF'}", 
+            callback_data="toggle_deleted"
+        )
+        builder.adjust(1)
+        
+        await message.answer(
+            status_text, 
+            parse_mode="MarkdownV2",
+            reply_markup=builder.as_markup()
+        )
+
+@dp.callback_query()
+async def handle_callback(callback: types.CallbackQuery):
+    if str(callback.from_user.id) != os.getenv("USER_ID"):
+        return
+    
+    action = callback.data
+    if action == "toggle_edited":
+        db.toggle_setting("notify_edited")
+    elif action == "toggle_deleted":
+        db.toggle_setting("notify_deleted")
+    
+    settings = db.get_settings()
+    stats = db.get_stats()
+    next_cleanup = datetime.now() + timedelta(seconds=CLEANUP_INTERVAL)
+    
+    status_text = (
+        "*Статус бота:*\n\n"
+        f"Сохранено сообщений: *{stats['total_messages']}*\n"
+        f"Медиафайлов: *{stats['total_media']}*\n"
+        f"Следующая очистка через: *{(next_cleanup - datetime.now()).seconds // 60} мин*\n\n"
+        "*Настройки:*"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"Изменённые: {'🟢 ON' if settings['notify_edited'] else '🔴 OFF'}", 
+        callback_data="toggle_edited"
+    )
+    builder.button(
+        text=f"Удалённые: {'🟢 ON' if settings['notify_deleted'] else '🔴 OFF'}", 
+        callback_data="toggle_deleted"
+    )
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        status_text,
+        parse_mode="MarkdownV2",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
 
 @dp.business_message()
 async def message(message: types.Message):
@@ -66,6 +125,10 @@ async def message(message: types.Message):
 @dp.edited_business_message()
 async def edited_message(message: types.Message):
     if str(message.from_user.id) == os.getenv("USER_ID"):
+        return
+
+    settings = db.get_settings()
+    if not settings["notify_edited"]:
         return
 
     old_message = db.get_message(message.chat.id, message.message_id)
@@ -88,6 +151,10 @@ async def edited_message(message: types.Message):
 
 @dp.deleted_business_messages()
 async def deleted_message(business_messages: types.BusinessMessagesDeleted):
+    settings = db.get_settings()
+    if not settings["notify_deleted"]:
+        return
+
     for message_id in business_messages.message_ids:
         old_message = db.get_message(business_messages.chat.id, message_id)
         
@@ -189,15 +256,20 @@ async def deleted_message(business_messages: types.BusinessMessagesDeleted):
 
 @dp.business_connection()
 async def on_business_connection(event: types.BusinessConnection):
+    if str(event.user.id) != os.getenv("USER_ID"):
+        return
+
     if event.is_enabled:
         await bot.send_message(
             chat_id=event.user.id,
-            text="Бот успешно подключен к Telegram Business!"
+            text="_Бот успешно подключен к Telegram Business!_",
+            parse_mode="MarkdownV2"
         )
     else:
         await bot.send_message(
             chat_id=event.user.id,
-            text="Бот отключен от Telegram Business."
+            text="_Бот успешно отключен от Telegram Business._",
+            parse_mode="MarkdownV2"
         )
 
 async def cleanup_messages():
@@ -223,6 +295,7 @@ if __name__ == "__main__":
             "business_message",
             "edited_business_message",
             "deleted_business_messages",
-            "business_connection"
+            "business_connection",
+            "callback_query"
         ],
     )
