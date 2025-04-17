@@ -237,16 +237,11 @@ class Database:
         cursor.execute("SELECT COUNT(*) FROM media_files")
         total_media = cursor.fetchone()[0]
         
-        cursor.execute("SELECT created_at FROM messages ORDER BY created_at DESC LIMIT 1")
-        last_message = cursor.fetchone()
-        last_message_time = last_message[0] if last_message else None
-        
         conn.close()
         
         return {
             "total_messages": total_messages,
-            "total_media": total_media,
-            "last_message_time": last_message_time
+            "total_media": total_media
         }
 
     def get_settings(self):

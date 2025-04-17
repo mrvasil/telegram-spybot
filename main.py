@@ -19,6 +19,12 @@ db = Database()
 MESSAGES_LIFETIME = int(os.getenv("MESSAGES_LIFETIME", 24)) #часы
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 3600)) #секунды
 
+def escape_markdown(text: str) -> str:
+    if not text:
+        return ""
+    characters = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    return re.sub(f"([{''.join(map(re.escape, characters))}])", r'\\\1', text)
+
 def format_as_quote(text: str) -> str:
     if not text:
         return ""
@@ -50,13 +56,11 @@ async def start_command(message: types.Message):
     else:
         stats = db.get_stats()
         settings = db.get_settings()
-        next_cleanup = datetime.now() + timedelta(seconds=CLEANUP_INTERVAL)
         
         status_text = (
             "*Статус бота:*\n\n"
             f"Сохранено сообщений: *{stats['total_messages']}*\n"
-            f"Медиафайлов: *{stats['total_media']}*\n"
-            f"Следующая очистка через: *{(next_cleanup - datetime.now()).seconds // 60} мин*\n\n"
+            f"Сохранено медиафайлов: *{stats['total_media']}*\n\n"
             "*Настройки:*"
         )
 
@@ -90,13 +94,11 @@ async def handle_callback(callback: types.CallbackQuery):
     
     settings = db.get_settings()
     stats = db.get_stats()
-    next_cleanup = datetime.now() + timedelta(seconds=CLEANUP_INTERVAL)
     
     status_text = (
         "*Статус бота:*\n\n"
         f"Сохранено сообщений: *{stats['total_messages']}*\n"
-        f"Медиафайлов: *{stats['total_media']}*\n"
-        f"Следующая очистка через: *{(next_cleanup - datetime.now()).seconds // 60} мин*\n\n"
+        f"Сохранено медиафайлов: *{stats['total_media']}*\n\n"
         "*Настройки:*"
     )
     
@@ -120,7 +122,8 @@ async def handle_callback(callback: types.CallbackQuery):
 
 @dp.business_message()
 async def message(message: types.Message):
-    await save_message(message)
+    if str(message.from_user.id) != os.getenv("USER_ID"):
+        await save_message(message)
 
 @dp.edited_business_message()
 async def edited_message(message: types.Message):
