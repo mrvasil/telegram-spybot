@@ -41,6 +41,8 @@ class Database:
             text TEXT,
             date TEXT,
             created_at TEXT,
+            is_forwarded INTEGER DEFAULT 0,
+            forward_from TEXT,
             PRIMARY KEY (chat_id, message_id)
         )
         ''')
@@ -108,16 +110,28 @@ class Database:
             
         created_at = datetime.now().isoformat()
         
+        is_forwarded = 0
+        forward_from = ""
+        
+        if message.forward_from:
+            is_forwarded = 1
+            forward_from = f"@{message.forward_from.username}" if message.forward_from.username else f"ID: {message.forward_from.id}"
+        elif message.forward_from_chat:
+            is_forwarded = 1
+            forward_from = f"@{message.forward_from_chat.username}" if message.forward_from_chat.username else f"ID: {message.forward_from_chat.id}"
+        
         cursor.execute(
-            "INSERT OR REPLACE INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 message.chat.id,
                 message.message_id,
                 message.from_user.id if message.from_user else None,
                 message.from_user.username if message.from_user else None,
-                message.caption or message.text or ("*стикер*" if message.sticker else "*кружок*" if message.video_note else ""),
+                message.md_text or message.caption or ("*sticker*" if message.sticker else "*video note*" if message.video_note else ""),
                 message.date.isoformat(),
-                created_at
+                created_at,
+                is_forwarded,
+                forward_from
             )
         )
         
@@ -170,6 +184,8 @@ class Database:
             "text": row[4],
             "date": row[5],
             "created_at": row[6],
+            "is_forwarded": bool(row[7]) if len(row) > 7 else False,
+            "forward_from": row[8] if len(row) > 8 else "",
             "media_files": media_files
         }
         

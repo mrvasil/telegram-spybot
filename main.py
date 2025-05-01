@@ -3,11 +3,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 import os
 import asyncio
-from datetime import datetime, timedelta
-import re
+from datetime import datetime
 
 from database import Database
-from media import download_media
 
 load_dotenv()
 
@@ -16,20 +14,22 @@ dp = Dispatcher()
 
 db = Database()
 
-MESSAGES_LIFETIME = int(os.getenv("MESSAGES_LIFETIME", 24)) #часы
-CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 3600)) #секунды
-
-def escape_markdown(text: str) -> str:
-    if not text:
-        return ""
-    characters = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    return re.sub(f"([{''.join(map(re.escape, characters))}])", r'\\\1', text)
+MESSAGES_LIFETIME = int(os.getenv("MESSAGES_LIFETIME", 24))
+CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 3600))
 
 def format_as_quote(text: str) -> str:
     if not text:
         return ""
     lines = text.split('\n')
     return '\n'.join(f'> {line}' if line.strip() else '>' for line in lines)
+
+async def download_media(bot: Bot, file_id: str, path: str):
+    if not os.path.exists(os.path.dirname(path)):
+        os.makedirs(os.path.dirname(path))
+    
+    file = await bot.get_file(file_id)
+    await bot.download_file(file.file_path, path)
+    return path
 
 async def save_message(message: types.Message):
     if str(message.from_user.id) == os.getenv("USER_ID"):
@@ -39,6 +39,30 @@ async def save_message(message: types.Message):
     
     for media_path, file_id in saved_media:
         await download_media(bot, file_id, media_path)
+
+def get_status_message():
+    settings = db.get_settings()
+    stats = db.get_stats()
+    
+    status_text = (
+        "*Статус бота:*\n\n"
+        f"Сохранено сообщений: *{stats['total_messages']}*\n"
+        f"Сохранено медиафайлов: *{stats['total_media']}*\n\n"
+        "*Настройки:*"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"Edited: {'🟢 ON' if settings['notify_edited'] else '🔴 OFF'}", 
+        callback_data="toggle_edited"
+    )
+    builder.button(
+        text=f"Deleted: {'🟢 ON' if settings['notify_deleted'] else '🔴 OFF'}", 
+        callback_data="toggle_deleted"
+    )
+    builder.adjust(1)
+    
+    return status_text, builder.as_markup()
 
 @dp.message()
 async def start_command(message: types.Message):
@@ -54,31 +78,12 @@ async def start_command(message: types.Message):
             "Напишите любое сообщение, чтобы посмотреть статус бота"
         )
     else:
-        stats = db.get_stats()
-        settings = db.get_settings()
-        
-        status_text = (
-            "*Статус бота:*\n\n"
-            f"Сохранено сообщений: *{stats['total_messages']}*\n"
-            f"Сохранено медиафайлов: *{stats['total_media']}*\n\n"
-            "*Настройки:*"
-        )
-
-        builder = InlineKeyboardBuilder()
-        builder.button(
-            text=f"Изменённые: {'🟢 ON' if settings['notify_edited'] else '🔴 OFF'}", 
-            callback_data="toggle_edited"
-        )
-        builder.button(
-            text=f"Удалённые: {'🟢 ON' if settings['notify_deleted'] else '🔴 OFF'}", 
-            callback_data="toggle_deleted"
-        )
-        builder.adjust(1)
+        status_text, reply_markup = get_status_message()
         
         await message.answer(
             status_text, 
             parse_mode="MarkdownV2",
-            reply_markup=builder.as_markup()
+            reply_markup=reply_markup
         )
 
 @dp.callback_query()
@@ -92,31 +97,12 @@ async def handle_callback(callback: types.CallbackQuery):
     elif action == "toggle_deleted":
         db.toggle_setting("notify_deleted")
     
-    settings = db.get_settings()
-    stats = db.get_stats()
-    
-    status_text = (
-        "*Статус бота:*\n\n"
-        f"Сохранено сообщений: *{stats['total_messages']}*\n"
-        f"Сохранено медиафайлов: *{stats['total_media']}*\n\n"
-        "*Настройки:*"
-    )
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text=f"Изменённые: {'🟢 ON' if settings['notify_edited'] else '🔴 OFF'}", 
-        callback_data="toggle_edited"
-    )
-    builder.button(
-        text=f"Удалённые: {'🟢 ON' if settings['notify_deleted'] else '🔴 OFF'}", 
-        callback_data="toggle_deleted"
-    )
-    builder.adjust(1)
+    status_text, reply_markup = get_status_message()
     
     await callback.message.edit_text(
         status_text,
         parse_mode="MarkdownV2",
-        reply_markup=builder.as_markup()
+        reply_markup=reply_markup
     )
     await callback.answer()
 
@@ -140,10 +126,11 @@ async def edited_message(message: types.Message):
         return
 
     text = (
-        f"✏️ @{escape_markdown(old_message['username'])} \\(ID: {old_message['user_id']}\\) edited message\n\n"
-        f"from:\n{format_as_quote(escape_markdown(old_message['text']))}\n\n"
-        f"to:\n{format_as_quote(escape_markdown(message.text or message.caption or ''))}"
+        f"✏️ @{old_message['username']} изменил сообщение\n"
+        f"\n{format_as_quote(old_message['text'])}\n↓"
+        f"\n{format_as_quote(message.md_text or message.caption or '')}"
     )
+    
     await bot.send_message(
         chat_id=os.getenv("USER_ID"),
         text=text,
@@ -164,7 +151,12 @@ async def deleted_message(business_messages: types.BusinessMessagesDeleted):
         if not old_message or str(old_message['user_id']) == os.getenv("USER_ID"):
             continue
 
-        text = f"🗑️ @{escape_markdown(old_message['username'])} \\(ID: {old_message['user_id']}\\) deleted message:\n\n{format_as_quote(escape_markdown(old_message['text']))}"
+        text = f"🗑️ @{old_message['username']} deleted message:\n"
+        
+        if old_message['is_forwarded'] and old_message['forward_from']:
+            text += f"\n_Forwarded from {old_message['forward_from']}_"
+            
+        text += f"\n{format_as_quote(old_message['text'])}"
         
         if old_message['media_files']:
             sent_text = False
@@ -263,35 +255,26 @@ async def on_business_connection(event: types.BusinessConnection):
         return
 
     if event.is_enabled:
-        await bot.send_message(
-            chat_id=event.user.id,
-            text="_Бот успешно подключен к Telegram Business!_",
-            parse_mode="MarkdownV2"
-        )
+        text_="_Бот успешно отключен от Telegram Business._"
     else:
-        await bot.send_message(
-            chat_id=event.user.id,
-            text="_Бот успешно отключен от Telegram Business._",
-            parse_mode="MarkdownV2"
-        )
+        text_="_Бот успешно подключен к Telegram Business._"
+    
+    await bot.send_message(
+        chat_id=event.user.id,
+        text=text_,
+        parse_mode="MarkdownV2"
+    )
 
 async def cleanup_messages():
     while True:
         deleted_count = db.cleanup_old_messages(hours=MESSAGES_LIFETIME)
-        print(f"{datetime.now()}: Удалено {deleted_count} старых сообщений")
-
+        print(f"{datetime.now()}: Deleted {deleted_count} outdated messages")
         await asyncio.sleep(CLEANUP_INTERVAL)
 
-async def on_startup():
-    deleted_count = db.cleanup_old_messages(hours=MESSAGES_LIFETIME)
-    print(f"Удалено {deleted_count} старых сообщений")
-
+async def main():
     asyncio.create_task(cleanup_messages())
-
-if __name__ == "__main__":
-    dp.startup.register(on_startup)
     
-    dp.run_polling(
+    await dp.start_polling(
         bot,
         allowed_updates=[
             "message",
@@ -302,3 +285,6 @@ if __name__ == "__main__":
             "callback_query"
         ],
     )
+
+if __name__ == "__main__":
+    asyncio.run(main())

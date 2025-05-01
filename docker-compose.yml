@@ -1,8 +1,7 @@
-version: '3.8'
-
 services:
   telegram-spybot:
     container_name: telegram-spybot
+    image: telegram-spybot
     build: .
     restart: always
     env_file:
