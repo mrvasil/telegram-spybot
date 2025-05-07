@@ -202,19 +202,18 @@ async def start_command(message: types.Message):
         help_text = (
             "*Available commands:*\n\n"
             "/help \\- show this message\n"
-            "/history username \\[limit\\] \\- show user action history\n"
-            "/stats \\- show bot statistics\n"
-            "/stats username \\- show user statistics\n"
-            "/cleanup \\- clear data\n\n"
-            "Actions: `/h username 5`"
+            "/history \\[username\\] \\[limit\\] or /h \\- show user action history\n"
+            "/user or /u \\- show bot statistics\n"
+            "/user \\[username\\] or /u \\[username\\] \\- show user statistics\n"
+            "/cleanup or /c \\- clear data\n\n"
         )
         await message.answer(help_text, parse_mode="MarkdownV2")
-    elif message.text == "/cleanup":
+    elif message.text == "/cleanup" or message.text == "/c":
         await message.answer(
-            "Usage:\n`/cleanup all` to clear entire database\n`/cleanup username` to delete user data", 
+            "Usage:\n`/cleanup all` or `/c all` to clear entire database\n`/cleanup username` or `/c username` to delete user data", 
             parse_mode="MarkdownV2"
         )
-    elif message.text == "/cleanup all":
+    elif message.text == "/cleanup all" or message.text == "/c all":
         deleted_messages, deleted_files = db.cleanup_all()
         await message.answer(
             f"🗑 *Database completely cleared*\n\n"
@@ -222,7 +221,7 @@ async def start_command(message: types.Message):
             f"Files deleted: *{deleted_files}*",
             parse_mode="MarkdownV2"
         )
-    elif message.text.startswith("/cleanup "):
+    elif message.text.startswith("/cleanup ") or message.text.startswith("/c "):
         username = message.text.split()[1].lstrip("@")
         
         if username == "all":
@@ -291,7 +290,7 @@ async def start_command(message: types.Message):
             text += f"{format_as_quote(msg_text)}\n\n"
         
         await message.answer(text, parse_mode="MarkdownV2")
-    elif message.text == "/stats":
+    elif message.text == "/user" or message.text == "/u":
         status_text, reply_markup = get_status_message()
         
         await message.answer(
@@ -299,7 +298,7 @@ async def start_command(message: types.Message):
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
         )
-    elif message.text.startswith("/stats "):
+    elif message.text.startswith("/user ") or message.text.startswith("/u "):
         username = message.text.split()[1].lstrip("@")
         stats = db.get_user_stats(username)
         
@@ -312,7 +311,7 @@ async def start_command(message: types.Message):
             f"Messages: *{stats['total_messages']}*\n"
             f"Media files: *{stats['total_media']}*\n"
             f"Actions: *{stats['total_actions']}*\n\n"
-            f"_Example:_ `/h {username} 5`"
+            f"_Last actions: `/h {username} 5`_"
         )
         
         builder = InlineKeyboardBuilder()
@@ -361,7 +360,7 @@ async def handle_callback(callback: types.CallbackQuery):
             f"Messages: *{stats['total_messages']}*\n"
             f"Media files: *{stats['total_media']}*\n"
             f"Actions: *{stats['total_actions']}*\n\n"
-            f"_Example:_ `/h {username} 5`"
+            f"_Last actions: `/h {username} 5`_"
         )
         
         builder = InlineKeyboardBuilder()
