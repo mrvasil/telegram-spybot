@@ -17,9 +17,16 @@ db = Database()
 MESSAGES_LIFETIME = int(os.getenv("MESSAGES_LIFETIME", 24))
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 3600))
 
+def escape_markdown(text: str) -> str:
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
 def format_as_quote(text: str) -> str:
     if not text:
         return ""
+    text = escape_markdown(text)
     lines = text.split('\n')
     return '\n'.join(f'> {line}' if line.strip() else '>' for line in lines)
 
@@ -98,17 +105,19 @@ async def handle_callback(callback: types.CallbackQuery):
         db.toggle_setting("notify_deleted")
     elif action.startswith("history_"):
         _, chat_id, message_id = action.split("_")
-        history = db.get_message_history(int(chat_id), int(message_id))
-            
-        text = "📝 *Edit History:*\n\n"
+        history = list(reversed(db.get_message_history(int(chat_id), int(message_id))))
+        text = "📝 Edit History:\n\n"
         for i, (msg_text, edited_at) in enumerate(history):
             dt = datetime.fromisoformat(edited_at)
             formatted_time = dt.strftime("%H:%M:%S")
-            text += f"_{formatted_time}_\n{format_as_quote(msg_text)}\n↓\n"
-        
+            text += f"_{formatted_time}_\n{format_as_quote(msg_text)}\n"
+            if i < len(history) - 1:
+                text += "↓\n"
         current_message = db.get_message(int(chat_id), int(message_id))
         if current_message:
             current_time = datetime.now().strftime("%H:%M:%S")
+            if history:
+                text += "↓\n"
             text += f"_{current_time}_\n{format_as_quote(current_message['text'])}"
         
         await callback.message.edit_text(
@@ -182,12 +191,12 @@ async def deleted_message(business_messages: types.BusinessMessagesDeleted):
         if not old_message or str(old_message['user_id']) == os.getenv("USER_ID"):
             continue
 
-        text = f"🗑️ @{old_message['username']} deleted message:\n"
+        text = f"🗑️ @{escape_markdown(old_message['username'])} deleted message:\n\n"
         
         if old_message['is_forwarded'] and old_message['forward_from']:
-            text += f"\n_Forwarded from {old_message['forward_from']}_"
+            text += f"_Forwarded from {escape_markdown(old_message['forward_from'])}_\n"
             
-        text += f"\n{format_as_quote(old_message['text'])}"
+        text += f"{format_as_quote(old_message['text'])}"
         
         if old_message['media_files']:
             sent_text = False

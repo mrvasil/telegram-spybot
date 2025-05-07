@@ -126,10 +126,19 @@ class Database:
         
         if message.forward_from:
             is_forwarded = 1
-            forward_from = f"@{message.forward_from.username}" if message.forward_from.username else f"ID: {message.forward_from.id}"
+            if message.forward_from.username:
+                forward_from = f"@{message.forward_from.username}"
+            else:
+                forward_from = message.forward_from.full_name
         elif message.forward_from_chat:
             is_forwarded = 1
-            forward_from = f"@{message.forward_from_chat.username}" if message.forward_from_chat.username else f"ID: {message.forward_from_chat.id}"
+            if message.forward_from_chat.username:
+                forward_from = f"@{message.forward_from_chat.username}"
+            else:
+                forward_from = message.forward_from_chat.title
+        elif message.forward_sender_name:
+            is_forwarded = 1
+            forward_from = message.forward_sender_name
         
         cursor.execute(
             "INSERT OR REPLACE INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",

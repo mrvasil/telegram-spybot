@@ -5,6 +5,13 @@
 
 Телеграм бот для отслеживания удаленных и измененных сообщений в лс.
 
+### Установка Docker
+
+```bash
+curl -sSL https://get.docker.com | sh
+exit
+```
+
 ## Быстрая установка
 
 ```bash
@@ -20,11 +27,9 @@ cd telegram-spybot
 ```
 
 ### 2. Создать файл `.env`:
-```
-TOKEN=
-USER_ID=
-MESSAGES_LIFETIME=24
-CLEANUP_INTERVAL=3600
+```bash
+cp .env.example .env
+nano .env
 ```
 
 ### 3. Запустить через Docker Compose
