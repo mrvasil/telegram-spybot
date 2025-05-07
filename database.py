@@ -88,6 +88,7 @@ class Database:
 
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_edited', 1)")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_deleted', 1)")
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ignore_changes_below', 0)")
         
         conn.commit()
         conn.close()
@@ -321,7 +322,8 @@ class Database:
         
         return {
             "notify_edited": bool(settings.get("notify_edited", 1)),
-            "notify_deleted": bool(settings.get("notify_deleted", 1))
+            "notify_deleted": bool(settings.get("notify_deleted", 1)),
+            "ignore_changes_below": int(settings.get("ignore_changes_below", 0))
         }
 
     def toggle_setting(self, key: str):
@@ -581,3 +583,12 @@ class Database:
             'actions': actions,
             'media_files': media_files
         }
+
+    def set_ignore_changes_below(self, amount: int):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ignore_changes_below', ?)", (amount,))
+        
+        conn.commit()
+        conn.close()

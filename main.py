@@ -52,10 +52,13 @@ def get_status_message():
     settings = db.get_settings()
     stats = db.get_stats()
     
+    ignore_status = "no limit" if settings["ignore_changes_below"] == 0 else f"*{settings['ignore_changes_below']}* chars"
+    
     status_text = (
         "*Bot Status:*\n\n"
         f"Messages saved: *{stats['total_messages']}*\n"
-        f"Media files saved: *{stats['total_media']}*\n\n"
+        f"Media files saved: *{stats['total_media']}*\n"
+        f"Ignore edits below: {ignore_status}\n\n"
         "*Settings:*"
     )
     
@@ -194,18 +197,21 @@ async def start_command(message: types.Message):
             "*Telegram Spy Bot*\n\n"
             "To use this bot you need to:\n"
             "1\\. Enable *Business Mode* for this bot in @BotFather\n"
-            "2\\. *Connect bot* to Telegram Business in Telegram settings\n\n"
-            "_Available commands:_ /help"
+            "2\\. Connect bot to *Telegram Business* in app settings\n\n"
+            "_Available commands:_ /help\n\n"
+            "Recommended settings:\n"
+            "\\- Set minimum edit size to notify about: `/ignore 3`\n\n"
         )
         await message.answer(start_text, parse_mode="MarkdownV2")
     elif message.text == "/help":
         help_text = (
             "*Available commands:*\n\n"
             "/help \\- show this message\n"
+            "/bot \\- show bot statistics\n"
+            "/user \\[username\\] or /u \\- show user statistics\n"
             "/history \\[username\\] \\[limit\\] or /h \\- show user action history\n"
-            "/user or /u \\- show bot statistics\n"
-            "/user \\[username\\] or /u \\[username\\] \\- show user statistics\n"
-            "/cleanup or /c \\- clear data\n\n"
+            "/cleanup or /c \\- clear data\n"
+            "/ignore \\[amount\\] \\- ignore edits with less than N changed characters\n\n"
         )
         await message.answer(help_text, parse_mode="MarkdownV2")
     elif message.text == "/cleanup" or message.text == "/c":
@@ -262,7 +268,7 @@ async def start_command(message: types.Message):
             except ValueError:
                 await message.answer("Limit must be a positive number", parse_mode="MarkdownV2")
                 return
-            
+
         user_id, actions = db.get_user_actions(username, limit)
         
         if not actions:
@@ -290,13 +296,18 @@ async def start_command(message: types.Message):
             text += f"{format_as_quote(msg_text)}\n\n"
         
         await message.answer(text, parse_mode="MarkdownV2")
-    elif message.text == "/user" or message.text == "/u":
+    elif message.text == "/bot":
         status_text, reply_markup = get_status_message()
         
         await message.answer(
             status_text, 
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
+        )
+    elif message.text == "/user" or message.text == "/u":
+        await message.answer(
+            "Usage: `/user username` or `/u username` to show user statistics",
+            parse_mode="MarkdownV2"
         )
     elif message.text.startswith("/user ") or message.text.startswith("/u "):
         username = message.text.split()[1].lstrip("@")
@@ -325,6 +336,34 @@ async def start_command(message: types.Message):
             parse_mode="MarkdownV2",
             reply_markup=builder.as_markup()
         )
+    elif message.text == "/ignore":
+        settings = db.get_settings()
+        current = settings["ignore_changes_below"]
+        status = "no limit" if current == 0 else f"*{current}* characters"
+        
+        await message.answer(
+            f"🔍 *Ignore small edits*\n\n"
+            f"Current setting: {status} characters\n\n"
+            f"Usage:\n"
+            f"`/ignore 0` \\- show all edits \\(no limit\\)\n"
+            f"`/ignore 5` \\- ignore edits with less than 5 changed characters",
+            parse_mode="MarkdownV2"
+        )
+    elif message.text.startswith("/ignore "):
+        try:
+            amount = int(message.text.split()[1])
+            if amount < 0:
+                raise ValueError
+            db.set_ignore_changes_below(amount)
+            await message.answer(
+                f"Now ignoring edits with less than *{amount}* changed characters",
+                parse_mode="MarkdownV2"
+            )
+        except (IndexError, ValueError):
+            await message.answer(
+                "Please specify a valid number",
+                parse_mode="MarkdownV2"
+            )
     else:
         await message.answer(
             "Unknown command\\. Use /help to see available commands\\.",
@@ -456,6 +495,17 @@ async def edited_message(message: types.Message):
         return
 
     new_text = message.md_text or message.caption or ""
+    
+    if settings["ignore_changes_below"] > 0:
+        old_text = old_message['text']
+        min_len = min(len(old_text), len(new_text))
+        max_len = max(len(old_text), len(new_text))
+
+        changes = sum(1 for i in range(min_len) if old_text[i] != new_text[i])
+        changes += max_len - min_len
+        
+        if changes < settings["ignore_changes_below"]:
+            return
     
     db.save_message_action(message.chat.id, message.message_id, 'edit', old_message['text'], new_text)
     
