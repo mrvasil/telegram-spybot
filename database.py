@@ -48,6 +48,17 @@ class Database:
         ''')
         
         cursor.execute('''
+        CREATE TABLE IF NOT EXISTS message_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            message_id INTEGER,
+            text TEXT,
+            edited_at TEXT,
+            FOREIGN KEY (chat_id, message_id) REFERENCES messages (chat_id, message_id) ON DELETE CASCADE
+        )
+        ''')
+
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS media_files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id INTEGER,
@@ -282,3 +293,34 @@ class Database:
         
         conn.commit()
         conn.close()
+
+    def save_message_history(self, chat_id: int, message_id: int, old_text: str):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "INSERT INTO message_history (chat_id, message_id, text, edited_at) VALUES (?, ?, ?, ?)",
+            (chat_id, message_id, old_text, datetime.now().isoformat())
+        )
+        
+        conn.commit()
+        conn.close()
+
+    def get_message_history(self, chat_id: int, message_id: int):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            """
+            SELECT text, edited_at 
+            FROM message_history 
+            WHERE chat_id = ? AND message_id = ? 
+            ORDER BY edited_at DESC
+            """,
+            (chat_id, message_id)
+        )
+        
+        history = cursor.fetchall()
+        conn.close()
+        
+        return history

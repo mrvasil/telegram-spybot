@@ -45,10 +45,10 @@ def get_status_message():
     stats = db.get_stats()
     
     status_text = (
-        "*Статус бота:*\n\n"
-        f"Сохранено сообщений: *{stats['total_messages']}*\n"
-        f"Сохранено медиафайлов: *{stats['total_media']}*\n\n"
-        "*Настройки:*"
+        "*Bot Status:*\n\n"
+        f"Messages saved: *{stats['total_messages']}*\n"
+        f"Media files saved: *{stats['total_media']}*\n\n"
+        "*Settings:*"
     )
     
     builder = InlineKeyboardBuilder()
@@ -96,6 +96,28 @@ async def handle_callback(callback: types.CallbackQuery):
         db.toggle_setting("notify_edited")
     elif action == "toggle_deleted":
         db.toggle_setting("notify_deleted")
+    elif action.startswith("history_"):
+        _, chat_id, message_id = action.split("_")
+        history = db.get_message_history(int(chat_id), int(message_id))
+            
+        text = "📝 *Edit History:*\n\n"
+        for i, (msg_text, edited_at) in enumerate(history):
+            dt = datetime.fromisoformat(edited_at)
+            formatted_time = dt.strftime("%H:%M:%S")
+            text += f"_{formatted_time}_\n{format_as_quote(msg_text)}\n↓\n"
+        
+        current_message = db.get_message(int(chat_id), int(message_id))
+        if current_message:
+            current_time = datetime.now().strftime("%H:%M:%S")
+            text += f"_{current_time}_\n{format_as_quote(current_message['text'])}"
+        
+        await callback.message.edit_text(
+            text,
+            parse_mode="MarkdownV2",
+            reply_markup=None
+        )
+        await callback.answer()
+        return
     
     status_text, reply_markup = get_status_message()
     
@@ -125,6 +147,14 @@ async def edited_message(message: types.Message):
     if not old_message:
         return
 
+    db.save_message_history(message.chat.id, message.message_id, old_message['text'])
+
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="Edit History",
+        callback_data=f"history_{message.chat.id}_{message.message_id}"
+    )
+
     text = (
         f"✏️ @{old_message['username']} изменил сообщение\n"
         f"\n{format_as_quote(old_message['text'])}\n↓"
@@ -134,7 +164,8 @@ async def edited_message(message: types.Message):
     await bot.send_message(
         chat_id=os.getenv("USER_ID"),
         text=text,
-        parse_mode="MarkdownV2"
+        parse_mode="MarkdownV2",
+        reply_markup=builder.as_markup()
     )
     
     await save_message(message)
