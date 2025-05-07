@@ -3,7 +3,7 @@ services:
     container_name: telegram-spybot
     image: telegram-spybot
     build: .
-    restart: unless_stopped
+    restart: unless-stopped
     env_file:
       - .env
     volumes:
