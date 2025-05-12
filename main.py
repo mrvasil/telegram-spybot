@@ -19,17 +19,21 @@ MESSAGES_LIFETIME = int(os.getenv("MESSAGES_LIFETIME", 24))
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 3600))
 
 def escape_markdown(text: str) -> str:
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
+    if not text:
+        return ""
+    chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',]
+    for char in chars_to_escape:
+        text = text.replace(char, "\\" + char)
+    for char in chars_to_escape:
+        text = text.replace(char, "\\" + char)
+    text = text.replace("\n", "\n>")
     return text
 
 def format_as_quote(text: str) -> str:
     if not text:
         return ""
     text = escape_markdown(text)
-    lines = text.split('\n')
-    return '\n'.join(f'> {line}' if line.strip() else '>' for line in lines)
+    return f"**>{text}||"
 
 async def download_media(bot: Bot, file_id: str, path: str):
     if not os.path.exists(os.path.dirname(path)):
