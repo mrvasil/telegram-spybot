@@ -9,17 +9,17 @@ if ! command -v docker &> /dev/null; then
 fi
 
 if ! command -v docker-compose &> /dev/null; then
-    echo "Docker Compose id not installed"
+    echo "Docker Compose is not installed"
     exit 1
 fi
 
-echo -n "Enter your bot token: "
+echo -n "Enter your bot API token: "
 read BOT_TOKEN
 
-echo -n "Enter your Telegram ID: "
+echo -n "Enter your telegram user ID: "
 read USER_ID
 
-echo -n "Enter messages lifetime (default 24 hours): "
+echo -n "Enter messages lifetime (leave empty for 24 hours): "
 read MESSAGES_LIFETIME
 MESSAGES_LIFETIME=${MESSAGES_LIFETIME:-24}
 
