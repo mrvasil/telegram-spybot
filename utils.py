@@ -6,19 +6,19 @@ from datetime import datetime
 def escape_markdown(text: str) -> str:
     if not text:
         return ""
-    chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',]
-    for char in chars_to_escape:
-        text = text.replace(char, "\\" + char)
-    for char in chars_to_escape:
-        text = text.replace(char, "\\" + char)
-    text = text.replace("\n", "\n>")
-    return text
+        
+    SPECIAL_CHARS = ['\\', '_', '*', '[', ']', '(', ')', '~', '`', '>', '<', '&', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    
+    result = str(text)
+    for char in SPECIAL_CHARS:
+        result = result.replace(char, f"\\{char}")
+    return result
 
 def format_as_quote(text: str) -> str:
     if not text:
         return ""
     text = escape_markdown(text)
-    return f"**>{text}||"
+    return f">{text}"
 
 async def download_media(bot: Bot, file_id: str, path: str):
     if not os.path.exists(os.path.dirname(path)):

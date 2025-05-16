@@ -49,6 +49,8 @@ class Database:
             date TEXT,
             is_forwarded INTEGER DEFAULT 0,
             forward_from TEXT,
+            latitude REAL,
+            longitude REAL,
             PRIMARY KEY (chat_id, message_id),
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
@@ -127,17 +129,35 @@ class Database:
         
         text = message.md_text or message.caption or " "
         
+        latitude = None
+        longitude = None
+        if message.location and not message.location.live_period:
+            latitude = message.location.latitude
+            longitude = message.location.longitude
+            if not text or text == " ":
+                text = f"📍 {latitude}, {longitude}"
+        
+        cursor.execute("PRAGMA table_info(messages)")
+        columns = [row[1] for row in cursor.fetchall()]
+        placeholders = ','.join(['?' for _ in columns])
+        
+        values = {
+            'chat_id': message.chat.id,
+            'message_id': message.message_id,
+            'user_id': message.from_user.id,
+            'text': text,
+            'date': message.date.isoformat(),
+            'is_forwarded': is_forwarded,
+            'forward_from': forward_from,
+            'latitude': latitude,
+            'longitude': longitude
+        }
+        
+        ordered_values = [values.get(column, None) for column in columns]
+        
         cursor.execute(
-            "INSERT OR REPLACE INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                message.chat.id,
-                message.message_id,
-                message.from_user.id,
-                text,
-                message.date.isoformat(),
-                is_forwarded,
-                forward_from
-            )
+            f"INSERT OR REPLACE INTO messages VALUES ({placeholders})",
+            ordered_values
         )
         
         media_files = []
@@ -235,7 +255,9 @@ class Database:
             "date": row[4],
             "is_forwarded": bool(row[5]),
             "forward_from": row[6],
-            "username": row[7],
+            "latitude": row[7],
+            "longitude": row[8],
+            "username": row[9],
             "media_files": media_files
         }
 
@@ -260,7 +282,9 @@ class Database:
                 m.is_forwarded,
                 m.forward_from,
                 m.chat_id,
-                m.message_id
+                m.message_id,
+                m.latitude,
+                m.longitude
             FROM message_actions ma
             JOIN messages m ON ma.chat_id = m.chat_id AND ma.message_id = m.message_id
             WHERE m.user_id = ?
@@ -278,11 +302,13 @@ class Database:
             forward_from = row[5]
             chat_id = row[6]
             message_id = row[7]
+            latitude = row[8]
+            longitude = row[9]
             
             display_text = old_text if action_type == 'delete' else new_text
             action_name = 'deleted' if action_type == 'delete' else 'edited'
             
-            actions.append((action_name, display_text, action_date, is_forwarded, forward_from, chat_id, message_id))
+            actions.append((action_name, display_text, action_date, is_forwarded, forward_from, chat_id, message_id, latitude, longitude))
         
         conn.close()
         return user_id, actions
@@ -543,7 +569,9 @@ class Database:
                 m.is_forwarded,
                 m.forward_from,
                 u.username,
-                m.text as current_text
+                m.text as current_text,
+                m.latitude,
+                m.longitude
             FROM messages m
             JOIN users u ON m.user_id = u.id
             WHERE m.message_id = ?
@@ -554,7 +582,7 @@ class Database:
             conn.close()
             return None
             
-        original_text, chat_id, date, is_forwarded, forward_from, username, current_text = message_info
+        original_text, chat_id, date, is_forwarded, forward_from, username, current_text, latitude, longitude = message_info
         
         cursor.execute("""
             SELECT action_type, old_text, new_text, action_date
@@ -581,7 +609,9 @@ class Database:
             'forward_from': forward_from,
             'username': username,
             'actions': actions,
-            'media_files': media_files
+            'media_files': media_files,
+            'latitude': latitude,
+            'longitude': longitude
         }
 
     def set_ignore_changes_below(self, amount: int):

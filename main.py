@@ -78,7 +78,12 @@ async def start_command(message: types.Message):
         dt = datetime.fromisoformat(history['date'])
         formatted_time = dt.strftime("%H:%M:%S")
         
-        text += f"created _{formatted_time}_\n{format_as_quote(history['original_text'])}\n\n"
+        text += f"created _{formatted_time}_\n"
+        if history['latitude'] is not None and history['longitude'] is not None:
+            maps_url = f"https://www.google.com/maps?q={history['latitude']},{history['longitude']}"
+            text += f"{format_as_quote(history['original_text'])} [Where?]({maps_url})\n\n"
+        else:
+            text += f"{format_as_quote(history['original_text'])}\n\n"
         
         for action_type, old_text, new_text, action_date in history['actions']:
             dt = datetime.fromisoformat(action_date)
@@ -152,7 +157,7 @@ async def start_command(message: types.Message):
             f"Files deleted: *{deleted_files}*",
             parse_mode="MarkdownV2"
         )
-    elif message.text.startswith("/history") or message.text == "/h":
+    elif message.text.startswith("/history") or message.text.startswith("/h"):
         parts = message.text.split()
         if len(parts) < 2:
             await message.answer("Usage: `/history username [limit]` or `/h username [limit]`", parse_mode="MarkdownV2")
@@ -180,7 +185,7 @@ async def start_command(message: types.Message):
         else:
             text = f"📋 Actions by @{escape_markdown(username)}:\n\n"
         
-        for action_name, msg_text, date, is_forwarded, forward_from, chat_id, message_id in actions:
+        for action_name, msg_text, date, is_forwarded, forward_from, chat_id, message_id, latitude, longitude in actions:
             dt = datetime.fromisoformat(date)
             time = dt.strftime("%H:%M:%S")
             
@@ -193,7 +198,12 @@ async def start_command(message: types.Message):
                 text += f"{icon} _{escape_markdown(time)}_ /{message_id} \\(_{escape_markdown(f'from @{forward_from}')}_)\n"
             else:
                 text += f"{icon} _{escape_markdown(time)}_ /{message_id}\n"
-            text += f"{format_as_quote(msg_text)}\n\n"
+            
+            if latitude is not None and longitude is not None:
+                maps_url = f"https://www.google.com/maps?q={latitude},{longitude}"
+                text += f"{format_as_quote(msg_text)} [Where?]({maps_url})\n\n"
+            else:
+                text += f"{format_as_quote(msg_text)}\n\n"
         
         await message.answer(text, parse_mode="MarkdownV2")
     elif message.text == "/bot":
@@ -450,9 +460,15 @@ async def deleted_message(business_messages: types.BusinessMessagesDeleted):
         text = f"🗑 @{escape_markdown(old_message['username'])} deleted message:\n\n"
         
         if old_message['is_forwarded'] and old_message['forward_from']:
-            text += f"_Forwarded from @{escape_markdown(old_message['forward_from'])}_\n"
+            text += f"_Forwarded from @{escape_markdown(old_message['forward_from'])}_\n\n"
             
-        text += f"{format_as_quote(old_message['text'])}\n\n{msg_id}"
+        if old_message['latitude'] is not None and old_message['longitude'] is not None:
+            maps_url = f"https://www.google.com/maps?q={old_message['latitude']},{old_message['longitude']}"
+            text += f"📍 Location: `{old_message['latitude']}, {old_message['longitude']}`\n[Where?]({maps_url})\n\n"
+        else:
+            text += f"{format_as_quote(old_message['text'])}\n\n"
+            
+        text += msg_id
         
         await send_media_message(bot, old_message['media_files'], text)
             
