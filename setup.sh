@@ -10,7 +10,7 @@ print_logo() {
     echo -e "${BLUE}"
     echo "┌─────────────────────────────────────┐"
     echo "│                                     │"
-    echo "│        🕵️‍♂️ TELEGRAM SPY BOT        │"
+    echo "│          TELEGRAM SPY BOT           │"
     echo "│                                     │"
     echo "└─────────────────────────────────────┘"
     echo -e "${NC}"

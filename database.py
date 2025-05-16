@@ -88,7 +88,6 @@ class Database:
 
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_edited', 1)")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_deleted', 1)")
-        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_scheduled', 1)")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ignore_changes_below', 0)")
         
         conn.commit()
@@ -324,7 +323,6 @@ class Database:
         return {
             "notify_edited": bool(settings.get("notify_edited", 1)),
             "notify_deleted": bool(settings.get("notify_deleted", 1)),
-            "notify_scheduled": bool(settings.get("notify_scheduled", 1)),
             "ignore_changes_below": int(settings.get("ignore_changes_below", 0))
         }
 
@@ -558,15 +556,6 @@ class Database:
             
         original_text, chat_id, date, is_forwarded, forward_from, username, current_text = message_info
         
-        # Проверяем, отложенное ли это сообщение (по секунде отправки)
-        is_scheduled = False
-        try:
-            message_datetime = datetime.fromisoformat(date)
-            if message_datetime.second == 1:
-                is_scheduled = True
-        except:
-            pass
-        
         cursor.execute("""
             SELECT action_type, old_text, new_text, action_date
             FROM message_actions
@@ -592,8 +581,7 @@ class Database:
             'forward_from': forward_from,
             'username': username,
             'actions': actions,
-            'media_files': media_files,
-            'is_scheduled': is_scheduled
+            'media_files': media_files
         }
 
     def set_ignore_changes_below(self, amount: int):

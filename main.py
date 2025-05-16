@@ -48,10 +48,6 @@ def get_status_message():
         text=f"Deleted: {'ON' if settings['notify_deleted'] else 'OFF'}", 
         callback_data="toggle_deleted"
     )
-    builder.button(
-        text=f"Scheduled: {'ON' if settings.get('notify_scheduled', True) else 'OFF'}", 
-        callback_data="toggle_scheduled"
-    )
     builder.adjust(1)
     
     return status_text, builder.as_markup()
@@ -82,10 +78,7 @@ async def start_command(message: types.Message):
         dt = datetime.fromisoformat(history['date'])
         formatted_time = dt.strftime("%H:%M:%S")
         
-        if history['is_scheduled']:
-            text += f"created _{formatted_time}_ ⏱ _scheduled message_\n{format_as_quote(history['original_text'])}\n\n"
-        else:
-            text += f"created _{formatted_time}_\n{format_as_quote(history['original_text'])}\n\n"
+        text += f"created _{formatted_time}_\n{format_as_quote(history['original_text'])}\n\n"
         
         for action_type, old_text, new_text, action_date in history['actions']:
             dt = datetime.fromisoformat(action_date)
@@ -287,8 +280,6 @@ async def handle_callback(callback: types.CallbackQuery):
         db.toggle_setting("notify_edited")
     elif action == "toggle_deleted":
         db.toggle_setting("notify_deleted")
-    elif action == "toggle_scheduled":
-        db.toggle_setting("notify_scheduled")
     elif action.startswith("toggle_notify_"):
         user_id = int(action.split("_")[2])
         db.toggle_user_notify(user_id)
@@ -378,18 +369,6 @@ async def handle_callback(callback: types.CallbackQuery):
 @dp.business_message()
 async def message(message: types.Message):
     if str(message.from_user.id) != os.getenv("USER_ID"):
-        if message.date.second == 1:
-            settings = db.get_settings()
-            if settings.get("notify_scheduled", True):
-                msg_id = f"/{message.message_id}"
-                text = f"⏱ Possibly @{escape_markdown(message.from_user.username or str(message.from_user.id))} sent a scheduled message:\n\n"
-                
-                message_text = message.md_text or message.caption or ""
-                text += f"{format_as_quote(message_text)}\n\n{msg_id}"
-                
-                media_files = await collect_media_from_message(bot, message)
-                await send_media_message(bot, media_files, text)
-                
         await save_message(bot, message, db)
 
 @dp.edited_business_message()
