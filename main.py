@@ -1,5 +1,6 @@
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.client.session.aiohttp import AiohttpSession
 from dotenv import load_dotenv
 import os
 import asyncio
@@ -17,7 +18,13 @@ from utils import (
 
 load_dotenv()
 
-bot = Bot(token=os.getenv("TOKEN"))
+_proxy_url = os.getenv("PROXY_URL")
+if _proxy_url:
+    from aiohttp_socks import ProxyConnector
+    _session = AiohttpSession(connector=ProxyConnector.from_url(_proxy_url))
+    bot = Bot(token=os.getenv("TOKEN"), session=_session)
+else:
+    bot = Bot(token=os.getenv("TOKEN"))
 dp = Dispatcher()
 
 db = Database()
