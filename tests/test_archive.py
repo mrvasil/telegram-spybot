@@ -369,3 +369,107 @@ async def test_disabled_connection_keeps_inflight_and_original_cannot_revert_edi
         archive, message(1, edit=True, text="edit", date=100), message(2, text="original", date=100)
     )
     assert (await archive.list_messages())[0]["text"] == "edit"
+
+
+async def test_history_exports_original_update_envelope(archive):
+    update = message(1)
+    update["future_top_level"] = {"data": ["all", "preserved"]}
+    await apply(archive, update)
+    assert (await archive.history(1))["updates"] == [{"update_id": 1, "payload": update}]
+
+
+async def test_reads_wait_for_uncommitted_application(archive, monkeypatch):
+    update = message(1, photo=[{"file_id": "f"}])
+    await archive.ingest_batch([update])
+    original = archive._enqueue
+    entered, proceed = asyncio.Event(), asyncio.Event()
+
+    async def pause(*args):
+        await original(*args)
+        entered.set()
+        await proceed.wait()
+
+    monkeypatch.setattr(archive, "_enqueue", pause)
+    application = asyncio.create_task(archive.apply_update(update))
+    await entered.wait()
+    reading = asyncio.create_task(archive.stats())
+    await asyncio.sleep(0)
+    assert not reading.done()
+    proceed.set()
+    await application
+    assert (await reading)["versions"] == 1
+
+
+async def test_sqlcipher_runtime_pragmas_are_enforced(archive):
+    async with archive._lock:
+        assert (await archive._one("PRAGMA journal_mode"))["journal_mode"] == "wal"
+        assert (await archive._one("PRAGMA synchronous"))["synchronous"] == 2
+        assert (await archive._one("PRAGMA temp_store"))["temp_store"] == 2
+        assert (await archive._one("PRAGMA foreign_keys"))["foreign_keys"] == 1
+        assert (await archive._one("PRAGMA cipher_version"))["cipher_version"]
+
+
+async def test_erase_preserves_unrelated_pending_reply_and_mixed_deletion(archive):
+    erased = message(1, text="erase this")
+    await apply(archive, erased, message(2, message_id=2, text="keep me"))
+    reply = message(
+        3, message_id=3, text="pending reply", reply_to_message=erased["business_message"]
+    )
+    await archive.ingest_batch([reply, deleted(4, message_ids=[1, 2])])
+    await archive.erase_message(1)
+    pending = await archive.pending_updates()
+    assert [r["update_id"] for r in pending] == [3, 4]
+    assert pending[1]["payload"]["deleted_business_messages"]["message_ids"] == [2]
+    assert "erase this" not in json.dumps(pending)
+    for row in pending:
+        await archive.apply_update(row["payload"])
+    rows = await archive.list_messages()
+    assert next(row for row in rows if row["message_id"] == 3)["text"] == "pending reply"
+    assert next(row for row in rows if row["message_id"] == 2)["deleted_at"] is not None
+    assert await archive.get_offset() == 5
+
+
+async def test_erase_redacts_deep_context_in_every_surviving_version(archive):
+    c = {
+        "message_id": 3,
+        "chat": {"id": 10},
+        "date": 100,
+        "text": "private nested sentinel",
+        "photo": [{"file_id": "private_file"}],
+    }
+    b = {
+        "message_id": 2,
+        "chat": {"id": 10},
+        "date": 100,
+        "text": "retained B",
+        "reply_to_message": c,
+    }
+    await apply(archive, message(1, text="retained A", reply_to_message=b))
+    c_id = next(row["id"] for row in await archive.list_messages() if row["message_id"] == 3)
+    await archive.erase_message(c_id)
+    assert await archive.search("private") == []
+    for row in await archive.list_messages():
+        serialized = json.dumps(await archive.history(row["id"]))
+        assert "private nested sentinel" not in serialized
+        assert "private_file" not in serialized
+    assert (await archive.stats())["messages"] == 2
+
+
+async def test_job_heartbeat_and_stale_attempt_fencing(archive, monkeypatch):
+    now = time.time()
+    monkeypatch.setattr("spybot.archive.time.time", lambda: now)
+    id = await archive.enqueue("media", "lease", {"media_id": 1})
+    first = await archive.claim_job("media", lease_seconds=10)
+    now += 5
+    assert await archive.renew_job(id, first["attempts"], lease_seconds=20)
+    now += 6
+    assert await archive.claim_job("media") is None
+    now += 20
+    assert not await archive.renew_job(id, first["attempts"], lease_seconds=20)
+    second = await archive.claim_job("media")
+    assert second["attempts"] == first["attempts"] + 1
+    assert not await archive.finish_job(id, attempts=first["attempts"])
+    assert not await archive.retry_job(id, "stale_error", 0, attempts=first["attempts"])
+    assert not await archive.renew_job(id, first["attempts"], lease_seconds=20)
+    assert await archive.finish_job(id, attempts=second["attempts"])
+    assert not await archive.retry_job(id, "already_done", 0, attempts=second["attempts"])

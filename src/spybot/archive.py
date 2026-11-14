@@ -448,11 +448,30 @@ class Archive:
                 "payload": json.loads(row["payload"]),
             }
 
-    async def finish_job(self, id: int) -> None:
+    async def renew_job(self, id: int, attempts: int, lease_seconds: float = 300) -> bool:
+        if lease_seconds <= 0:
+            raise ValueError("lease_must_be_positive")
         async with self._transaction():
-            await self._db.execute(
-                "UPDATE jobs SET state='done',lease_until=NULL,last_error=NULL WHERE id=?", (id,)
+            now = time.time()
+            cursor = await self._db.execute(
+                "UPDATE jobs SET lease_until=? WHERE id=? AND attempts=? "
+                "AND state='running' AND lease_until>?",
+                (now + lease_seconds, id, attempts, now),
             )
+            changed = cursor.rowcount > 0
+            await cursor.close()
+            return changed
+
+    async def finish_job(self, id: int, *, attempts: int | None = None) -> bool:
+        async with self._transaction():
+            cursor = await self._db.execute(
+                "UPDATE jobs SET state='done',lease_until=NULL,last_error=NULL WHERE id=? "
+                "AND (? IS NULL OR (attempts=? AND state='running'))",
+                (id, attempts, attempts),
+            )
+            changed = cursor.rowcount > 0
+            await cursor.close()
+            return changed
 
     async def retry_job(
         self,
@@ -461,15 +480,28 @@ class Archive:
         delay: float,
         terminal: bool = False,
         state: str | None = None,
-    ) -> None:
+        *,
+        attempts: int | None = None,
+    ) -> bool:
         target = state or ("failed" if terminal else "pending")
         if target not in {"pending", "failed", "blocked", "uncertain"}:
             raise ValueError("invalid_retry_state")
         async with self._transaction():
-            await self._db.execute(
-                "UPDATE jobs SET state=?,available_at=?,lease_until=NULL,last_error=? WHERE id=?",
-                (target, time.time() + max(0, delay), _error_code(error_code), id),
+            cursor = await self._db.execute(
+                "UPDATE jobs SET state=?,available_at=?,lease_until=NULL,last_error=? WHERE id=? "
+                "AND (? IS NULL OR (attempts=? AND state='running'))",
+                (
+                    target,
+                    time.time() + max(0, delay),
+                    _error_code(error_code),
+                    id,
+                    attempts,
+                    attempts,
+                ),
             )
+            changed = cursor.rowcount > 0
+            await cursor.close()
+            return changed
 
     async def media(self, id: int) -> dict | None:
         async with self._lock:
@@ -577,8 +609,15 @@ class Archive:
                 "SELECT * FROM deletion_events WHERE message_fk=? ORDER BY event_update_id",
                 (internal_id,),
             )
+            updates = await self._all(
+                "SELECT update_id,payload FROM inbox WHERE update_id IN "
+                "(SELECT event_update_id FROM versions WHERE message_fk=? "
+                "UNION SELECT event_update_id FROM deletion_events WHERE message_fk=?) ORDER BY update_id",
+                (internal_id, internal_id),
+            )
             return {
                 "message": message,
+                "updates": [{**row, "payload": json.loads(row["payload"])} for row in updates],
                 "versions": [{**v, "payload": json.loads(v["payload"])} for v in versions],
                 "deletion_events": [{**v, "payload": json.loads(v["payload"])} for v in deletions],
                 "media": await self._message_media(internal_id),
@@ -615,18 +654,34 @@ class Archive:
             "OR (kind IN ('notification','export') AND json_extract(payload,'$.message_id')=?)",
             (id, id),
         )
-        # Remove any retained inbox event carrying this message, including a nested snapshot.
-        rows = await self._all("SELECT update_id,payload FROM inbox")
-        for row in rows:
-            if _contains_message(json.loads(row["payload"]), *identity):
-                await self._db.execute("DELETE FROM inbox WHERE update_id=?", (row["update_id"],))
-        # Redact embedded copies in other versions; keep their unrelated content.
-        for row in await self._all("SELECT id,payload FROM versions WHERE message_fk<>?", (id,)):
-            payload = json.loads(row["payload"])
-            if _redact_message(payload, *identity):
-                await self._db.execute(
-                    "UPDATE versions SET payload=? WHERE id=?", (_json(payload), row["id"])
-                )
+        # Preserve unrelated pending operations and their retry/processing state.
+        # A mixed deletion or a reply can refer to the erased message without
+        # belonging to it. Redact only that identity; never drop the whole event.
+        async with self._db.execute(
+            "SELECT update_id,payload FROM inbox ORDER BY update_id"
+        ) as cursor:
+            async for row in cursor:
+                payload = json.loads(row["payload"])
+                sanitized = _sanitize_payload(payload, {identity})
+                if sanitized != payload:
+                    await self._db.execute(
+                        "UPDATE inbox SET payload=? WHERE update_id=?",
+                        (_json(sanitized), row["update_id"]),
+                    )
+        # Standalone contextual snapshots do not contain business_connection_id;
+        # inherit it from their owning message, including nested/list snapshots.
+        async with self._db.execute(
+            "SELECT v.id,v.payload,m.connection_id FROM versions v "
+            "JOIN messages m ON m.id=v.message_fk WHERE v.message_fk<>? ORDER BY v.id",
+            (id,),
+        ) as cursor:
+            async for row in cursor:
+                payload = json.loads(row["payload"])
+                sanitized = _sanitize_payload(payload, {identity}, row["connection_id"])
+                if sanitized != payload:
+                    await self._db.execute(
+                        "UPDATE versions SET payload=? WHERE id=?", (_json(sanitized), row["id"])
+                    )
         await self._db.execute("DELETE FROM messages WHERE id=?", (id,))
         return list(dict.fromkeys(paths))
 
@@ -665,73 +720,19 @@ class Archive:
             await self._db._execute(backup)
 
 
-def _contains_message(
-    value: Any,
-    connection_id: str,
-    chat_id: int,
-    message_id: int,
-    inherited_connection: str | None = None,
-) -> bool:
-    if isinstance(value, dict):
-        connection = value.get("business_connection_id", inherited_connection)
-        if connection == connection_id and (value.get("chat") or {}).get("id") == chat_id:
-            if value.get("message_id") == message_id or message_id in value.get("message_ids", []):
-                return True
-        return any(
-            _contains_message(v, connection_id, chat_id, message_id, connection)
-            for v in value.values()
-        )
-    if isinstance(value, list):
-        return any(
-            _contains_message(v, connection_id, chat_id, message_id, inherited_connection)
-            for v in value
-        )
-    return False
-
-
-def _redact_message(
-    value: Any,
-    connection_id: str,
-    chat_id: int,
-    message_id: int,
-    inherited_connection: str | None = None,
-) -> bool:
-    changed = False
-    if isinstance(value, dict):
-        connection = value.get("business_connection_id", inherited_connection)
-        for key, item in list(value.items()):
-            if (
-                isinstance(item, dict)
-                and connection == connection_id
-                and (item.get("chat") or {}).get("id") == chat_id
-                and item.get("message_id") == message_id
-            ):
-                value[key] = {
-                    "message_id": message_id,
-                    "chat": {"id": chat_id},
-                    "archive_erased": True,
-                }
-                changed = True
-            else:
-                changed = (
-                    _redact_message(item, connection_id, chat_id, message_id, connection) or changed
-                )
-    elif isinstance(value, list):
-        for item in value:
-            changed = (
-                _redact_message(item, connection_id, chat_id, message_id, inherited_connection)
-                or changed
-            )
-    return changed
-
-
 def _sanitize_payload(
     value: Any, suppressed: set[tuple[str, int, int]], inherited_connection: str | None = None
 ) -> Any:
     if isinstance(value, dict):
         connection = value.get("business_connection_id", inherited_connection)
-        chat = value.get("chat") or {}
-        if (connection, chat.get("id"), value.get("message_id")) in suppressed:
+        raw_chat = value.get("chat")
+        chat = raw_chat if isinstance(raw_chat, dict) else {}
+        has_identity = (
+            isinstance(connection, str)
+            and isinstance(chat.get("id"), int)
+            and isinstance(value.get("message_id"), int)
+        )
+        if has_identity and (connection, chat.get("id"), value.get("message_id")) in suppressed:
             redacted = {
                 "message_id": value["message_id"],
                 "chat": {"id": chat["id"]},
@@ -743,7 +744,14 @@ def _sanitize_payload(
         result = {k: _sanitize_payload(v, suppressed, connection) for k, v in value.items()}
         if "message_ids" in value and isinstance(value["message_ids"], list):
             result["message_ids"] = [
-                i for i in value["message_ids"] if (connection, chat.get("id"), i) not in suppressed
+                i
+                for i in value["message_ids"]
+                if not (
+                    isinstance(connection, str)
+                    and isinstance(chat.get("id"), int)
+                    and isinstance(i, int)
+                    and (connection, chat["id"], i) in suppressed
+                )
             ]
         return result
     if isinstance(value, list):
