@@ -243,7 +243,23 @@ class Archive:
                 await self._mark_processed(update_id)
                 return
             if "business_connection" in update:
-                accepted = await self._remember_connection(update["business_connection"])
+                raw_connection = update["business_connection"]
+                previous = await self._one(
+                    "SELECT raw FROM connections WHERE id=?", (raw_connection["id"],)
+                )
+                accepted = await self._remember_connection(raw_connection)
+                old_connection = json.loads(previous["raw"]) if previous else None
+                changed = old_connection is None or any(
+                    old_connection.get(field) != raw_connection.get(field)
+                    for field in ("is_enabled", "rights")
+                )
+                if accepted and changed and notify:
+                    text = (
+                        "Подключение Telegram активно. Архивируются сообщения выбранных вами чатов."
+                        if raw_connection.get("is_enabled")
+                        else "Подключение Telegram отключено. Ранее полученные события остаются в архиве; новые сообщения могут не поступать."
+                    )
+                    await self._enqueue("notification", f"connection:{update_id}", {"text": text})
                 await self._mark_processed(update_id, ignored=not accepted)
                 await self._db.execute("INSERT INTO applied_events VALUES(?)", (update_id,))
                 return
@@ -388,7 +404,16 @@ class Archive:
             "UPDATE messages SET created_at=CASE WHEN created_at IS NULL THEN ? ELSE MIN(created_at,?) END WHERE id=?",
             (raw.get("date", source_date), raw.get("date", source_date), internal_id),
         )
-        for item in collect_media(raw, skip_context=True):
+        collected = collect_media(raw, skip_context=True)
+        largest_photo = max(
+            (
+                item["metadata"]["file"].get("width", 0) * item["metadata"]["file"].get("height", 0)
+                for item in collected
+                if item["kind"] == "photo"
+            ),
+            default=0,
+        )
+        for item in collected:
             cursor = await self._db.execute(
                 "INSERT INTO media(version_id,file_id,file_unique_id,kind,metadata) VALUES(?,?,?,?,?)",
                 (
@@ -401,8 +426,18 @@ class Archive:
             )
             media_id = cursor.lastrowid
             await cursor.close()
+            auxiliary = any(part in item["metadata"]["path"] for part in ("thumbnail", "/thumb/"))
+            smaller_photo = (
+                item["kind"] == "photo"
+                and item["metadata"]["file"].get("width", 0)
+                * item["metadata"]["file"].get("height", 0)
+                < largest_photo
+            )
+            priority = 10 if auxiliary or smaller_photo else 100
             await self._enqueue(
-                "media", f"media:{media_id}", {"media_id": media_id, "file_id": item["file_id"]}
+                "media",
+                f"media:{media_id}",
+                {"media_id": media_id, "file_id": item["file_id"], "priority": priority},
             )
         return internal_id, version_id
 
@@ -444,8 +479,9 @@ class Archive:
             )
             rows = await self._all(
                 "SELECT * FROM jobs WHERE kind=? AND state='pending' AND available_at<=? "
-                "AND (?=0 OR json_extract(payload,'$.event') IN ('edit','delete')) ORDER BY id LIMIT ?",
-                (kind, now, event_only, limit),
+                "AND (?=0 OR json_extract(payload,'$.event') IN ('edit','delete')) "
+                "ORDER BY CASE WHEN kind='media' THEN COALESCE(json_extract(payload,'$.priority'),100) + MIN(300,CAST((?-available_at)/30 AS INTEGER)) ELSE 0 END DESC,id LIMIT ?",
+                (kind, now, event_only, now, limit),
             )
             for row in rows:
                 await self._db.execute(
@@ -520,23 +556,60 @@ class Archive:
 
     async def media(self, id: int) -> dict | None:
         async with self._lock:
-            row = await self._one("SELECT * FROM media WHERE id=?", (id,))
+            row = await self._one(
+                "SELECT d.*,v.message_fk FROM media d JOIN versions v ON v.id=d.version_id WHERE d.id=?",
+                (id,),
+            )
             return {**row, "metadata": json.loads(row["metadata"])} if row else None
 
-    async def update_media(self, id: int, **allowed_fields) -> bool:
+    async def _update_media(self, id: int, fields: dict) -> bool:
         allowed = {"state", "object_path", "sha256", "size", "error"}
-        if not allowed_fields or set(allowed_fields) - allowed:
+        if not fields or set(fields) - allowed:
             raise ValueError("invalid_media_fields")
-        if allowed_fields.get("error") is not None:
-            allowed_fields["error"] = _error_code(allowed_fields["error"])
+        if fields.get("error") is not None:
+            fields["error"] = _error_code(fields["error"])
+        cursor = await self._db.execute(
+            f"UPDATE media SET {','.join(k + '=?' for k in fields)} WHERE id=?",
+            (*fields.values(), id),
+        )
+        changed = cursor.rowcount > 0
+        await cursor.close()
+        return changed
+
+    async def update_media(self, id: int, **allowed_fields) -> bool:
+        """Offline import/admin operation. Workers use finish_media_job for fencing."""
         async with self._transaction():
-            cursor = await self._db.execute(
-                f"UPDATE media SET {','.join(k + '=?' for k in allowed_fields)} WHERE id=?",
-                (*allowed_fields.values(), id),
+            return await self._update_media(id, allowed_fields)
+
+    async def finish_media_job(
+        self,
+        job_id: int,
+        attempts: int,
+        media_id: int,
+        fields: dict,
+        *,
+        error_code: str | None = None,
+        delay: float = 0,
+        terminal: bool = False,
+    ) -> bool:
+        """Atomically fence media state and the corresponding job transition."""
+        async with self._transaction():
+            job = await self._one(
+                "SELECT id FROM jobs WHERE id=? AND kind='media' AND state='running' AND attempts=? AND lease_until>? AND json_extract(payload,'$.media_id')=?",
+                (job_id, attempts, time.time(), media_id),
             )
-            changed = cursor.rowcount > 0
-            await cursor.close()
-            return changed
+            if job is None or not await self._update_media(media_id, fields):
+                return False
+            await self._db.execute(
+                "UPDATE jobs SET state=?,available_at=?,lease_until=NULL,last_error=? WHERE id=?",
+                (
+                    "done" if error_code is None else "failed" if terminal else "pending",
+                    time.time() + max(0, delay),
+                    _error_code(error_code) if error_code else None,
+                    job_id,
+                ),
+            )
+            return True
 
     async def object_paths(self) -> set[str]:
         async with self._lock:
@@ -596,9 +669,18 @@ class Archive:
                 (limit, offset),
             )
 
-    async def retry_failed(self, *, include_uncertain: bool = False) -> dict:
+    async def retry_failed(
+        self, *, include_uncertain: bool = False, dedupe_key: str | None = None
+    ) -> dict:
         """Owner action. Ambiguous sends require a second, explicit opt-in."""
         async with self._transaction():
+            if dedupe_key is not None:
+                previous = await self._one(
+                    "SELECT value FROM settings WHERE scope='retry_receipts' AND key=?",
+                    (dedupe_key,),
+                )
+                if previous is not None:
+                    return json.loads(previous["value"])
             predicate = "(state IN ('failed','blocked') OR (? AND state='uncertain'))"
             rows = await self._all(
                 "SELECT id,state FROM jobs WHERE " + predicate, (include_uncertain,)
@@ -620,11 +702,17 @@ class Archive:
             await self._db.execute(
                 "UPDATE inbox SET retry_at=0,last_error=NULL WHERE state='pending'"
             )
-            return {
+            result = {
                 "jobs": len(rows),
                 "uncertain_notifications": uncertain,
                 "updates": pending["count"],
             }
+            if dedupe_key is not None:
+                await self._db.execute(
+                    "INSERT INTO settings(scope,key,value) VALUES('retry_receipts',?,?)",
+                    (dedupe_key, _json(result)),
+                )
+            return result
 
     async def stats(self) -> dict:
         async with self._lock:

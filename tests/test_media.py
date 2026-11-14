@@ -119,3 +119,51 @@ async def test_missing_file_eventually_stops_retry_but_metadata_remains(fixture)
     assert (await archive.media(1))["state"] == "unavailable"
     assert await archive.claim_job("media") is None
     assert (await archive.history(1))["media"][0]["file_id"] == "file"
+
+
+async def test_media_commit_is_atomically_fenced_after_last_renewal(fixture):
+    archive, _, _ = fixture
+    old = await archive.claim_job("media")
+    assert await archive.renew_job(old["id"], old["attempts"])
+    async with archive._transaction():
+        await archive._db.execute("UPDATE jobs SET lease_until=0 WHERE id=?", (old["id"],))
+    current = await archive.claim_job("media")
+    assert await archive.finish_media_job(
+        current["id"], current["attempts"], 1, {"state": "saved", "sha256": "new-result"}
+    )
+    assert not await archive.finish_media_job(
+        old["id"],
+        old["attempts"],
+        1,
+        {"state": "failed", "error": "old-failure"},
+        error_code="old-failure",
+    )
+    media = await archive.media(1)
+    assert media["state"] == "saved" and media["sha256"] == "new-result"
+
+
+async def test_primary_media_precedes_previews_without_discarding_them(fixture):
+    archive, _, _ = fixture
+    # Complete the existing fixture job, then ingest thumbnail-first structures.
+    job = await archive.claim_job("media")
+    await archive.finish_job(job["id"], attempts=job["attempts"])
+    raw = {
+        "business_connection_id": "c",
+        "chat": {"id": 2},
+        "message_id": 9,
+        "date": 101,
+        "document": {"thumbnail": {"file_id": "thumb"}, "file_id": "main"},
+        "photo": [
+            {"file_id": "small", "width": 20, "height": 20},
+            {"file_id": "large", "width": 500, "height": 500},
+        ],
+    }
+    update = {"update_id": 3, "business_message": raw}
+    await archive.ingest_batch([update])
+    await archive.apply_update(update)
+    order = []
+    while job := await archive.claim_job("media"):
+        order.append(job["payload"]["file_id"])
+        await archive.finish_job(job["id"], attempts=job["attempts"])
+    assert set(order[:2]) == {"main", "large"}
+    assert set(order[2:]) == {"thumb", "small"}

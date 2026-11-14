@@ -439,48 +439,51 @@ class Commands:
         await self._reply(update_id, text, main_keyboard())
 
     async def _chats(self, update_id: int, page: int) -> None:
-        rows = await self.archive.list_chats(limit=PAGE + 1, offset=page * PAGE)
-        text, buttons = f"Чаты · страница {page + 1}\n", []
-        for row in rows[:PAGE]:
-            text += f"\n{preview(row.get('title') or str(row['chat_id']), 90)} · {row['chat_id']} · записей {row['messages']}"
-            buttons.append([button(f"Чат {row['chat_id']}", f"list:c:{row['chat_id']}:0")])
-        if not rows:
-            text += "\nЧатов пока нет. Проверьте подключение и выбранные чаты в Секретарском режиме. Старые сообщения не загружаются автоматически."
-        if nav := self._navigation("chats", page, len(rows) > PAGE):
-            buttons.append(nav)
-        buttons.append([button("Меню", "start")])
-        await self._reply(update_id, text, keyboard(buttons), sensitive=True)
+        async with self.operations.lock:
+            rows = await self.archive.list_chats(limit=PAGE + 1, offset=page * PAGE)
+            text, buttons = f"Чаты · страница {page + 1}\n", []
+            for row in rows[:PAGE]:
+                text += f"\n{preview(row.get('title') or str(row['chat_id']), 90)} · {row['chat_id']} · записей {row['messages']}"
+                buttons.append([button(f"Чат {row['chat_id']}", f"list:c:{row['chat_id']}:0")])
+            if not rows:
+                text += "\nЧатов пока нет. Проверьте подключение и выбранные чаты в Секретарском режиме. Старые сообщения не загружаются автоматически."
+            if nav := self._navigation("chats", page, len(rows) > PAGE):
+                buttons.append(nav)
+            buttons.append([button("Меню", "start")])
+            await self._reply(update_id, text, keyboard(buttons), sensitive=True)
 
     async def _messages(self, update_id: int, mode: str, chat_id: int, page: int) -> None:
-        rows = await self.archive.list_messages(
-            limit=PAGE + 1,
-            offset=page * PAGE,
-            chat_id=chat_id if mode == "c" else None,
-            deleted_only=mode == "d",
-        )
-        label = "Удалённые" if mode == "d" else f"Чат {chat_id}" if mode == "c" else "Архив"
-        text, buttons = f"{label} · страница {page + 1}\n", []
-        for row in rows[:PAGE]:
-            text += (
-                f"\n#{row['id']} · {preview(row.get('chat_title') or str(row['chat_id']), 55)}"
-                + (" · удалено" if row.get("deleted_at") is not None else "")
+        async with self.operations.lock:
+            rows = await self.archive.list_messages(
+                limit=PAGE + 1,
+                offset=page * PAGE,
+                chat_id=chat_id if mode == "c" else None,
+                deleted_only=mode == "d",
             )
-            text += (
-                "\n"
-                + preview(
-                    row.get("text") or row.get("caption") or "[Нет текста; откройте историю]", 180
+            label = "Удалённые" if mode == "d" else f"Чат {chat_id}" if mode == "c" else "Архив"
+            text, buttons = f"{label} · страница {page + 1}\n", []
+            for row in rows[:PAGE]:
+                text += (
+                    f"\n#{row['id']} · {preview(row.get('chat_title') or str(row['chat_id']), 55)}"
+                    + (" · удалено" if row.get("deleted_at") is not None else "")
                 )
-                + "\n"
-            )
-            buttons.append([button(f"История #{row['id']}", f"history:{row['id']}")])
-        if not rows:
-            text += "\nЗаписей на этой странице нет."
-        if nav := self._navigation(f"list:{mode}:{chat_id}", page, len(rows) > PAGE):
-            buttons.append(nav)
-        if mode == "c":
-            buttons.append([button("Настройки чата", f"settings:{chat_id}")])
-        buttons.append([button("Меню", "start")])
-        await self._reply(update_id, text, keyboard(buttons), sensitive=True)
+                text += (
+                    "\n"
+                    + preview(
+                        row.get("text") or row.get("caption") or "[Нет текста; откройте историю]",
+                        180,
+                    )
+                    + "\n"
+                )
+                buttons.append([button(f"История #{row['id']}", f"history:{row['id']}")])
+            if not rows:
+                text += "\nЗаписей на этой странице нет."
+            if nav := self._navigation(f"list:{mode}:{chat_id}", page, len(rows) > PAGE):
+                buttons.append(nav)
+            if mode == "c":
+                buttons.append([button("Настройки чата", f"settings:{chat_id}")])
+            buttons.append([button("Меню", "start")])
+            await self._reply(update_id, text, keyboard(buttons), sensitive=True)
 
     async def _history(self, update_id: int, message_id: int, index: int | None = None) -> None:
         history = await self.archive.history(message_id)
@@ -583,29 +586,30 @@ class Commands:
         await self._reply(update_id, text, keyboard(rows))
 
     async def _search(self, update_id: int, token: str, page: int) -> None:
-        state = await self.archive.get_setting(f"ui_search:{token}")
-        if not state or state["expires"] < time.time():
-            await self._reply(update_id, "Поиск устарел. Повторите /search слова.")
-            return
-        rows = await self.archive.search(
-            state["query"], limit=PAGE + 1, offset=page * PAGE, chat_id=state["chat_id"]
-        )
-        text, buttons = (
-            f"Поиск: {preview(state['query'], 120)} · страница {page + 1}\nРезультаты по всем сохранённым версиям.\n",
-            [],
-        )
-        for row in rows[:PAGE]:
-            text += f"\n#{row['message_id']} · версия {row['version_id']} · чат {row['chat_id']}\n{preview(row.get('text') or row.get('caption'), 180)}\n"
-            buttons.append(
-                [button(f"История #{row['message_id']}", f"history:{row['message_id']}")]
+        async with self.operations.lock:
+            state = await self.archive.get_setting(f"ui_search:{token}")
+            if not state or state["expires"] < time.time():
+                await self._reply(update_id, "Поиск устарел. Повторите /search слова.")
+                return
+            rows = await self.archive.search(
+                state["query"], limit=PAGE + 1, offset=page * PAGE, chat_id=state["chat_id"]
             )
-        if not rows:
-            text += "\nСовпадений нет."
-        if nav := self._navigation(f"search:{token}", page, len(rows) > PAGE):
-            buttons.append(nav)
-        await self._reply(
-            update_id, text, keyboard(buttons or [[button("Меню", "start")]]), sensitive=True
-        )
+            text, buttons = (
+                f"Поиск: {preview(state['query'], 120)} · страница {page + 1}\nРезультаты по всем сохранённым версиям.\n",
+                [],
+            )
+            for row in rows[:PAGE]:
+                text += f"\n#{row['message_id']} · версия {row['version_id']} · чат {row['chat_id']}\n{preview(row.get('text') or row.get('caption'), 180)}\n"
+                buttons.append(
+                    [button(f"История #{row['message_id']}", f"history:{row['message_id']}")]
+                )
+            if not rows:
+                text += "\nСовпадений нет."
+            if nav := self._navigation(f"search:{token}", page, len(rows) > PAGE):
+                buttons.append(nav)
+            await self._reply(
+                update_id, text, keyboard(buttons or [[button("Меню", "start")]]), sensitive=True
+            )
 
     async def _bookmark(self, update_id: int, message_id: int, desired: bool) -> None:
         if not await self.archive.set_bookmark(message_id, desired):
@@ -621,17 +625,18 @@ class Commands:
         )
 
     async def _bookmarks(self, update_id: int, page: int) -> None:
-        rows = await self.archive.list_bookmarks(limit=PAGE + 1, offset=page * PAGE)
-        text, buttons = f"Закладки · страница {page + 1}\n", []
-        for row in rows[:PAGE]:
-            text += f"\n#{row['id']} · {preview(row.get('text') or row.get('caption') or '[Нет текста]', 180)}\n"
-            buttons.append([button(f"История #{row['id']}", f"history:{row['id']}")])
-        if not rows:
-            text += "\nЗакладок нет. Добавьте /bookmark ID или откройте историю записи."
-        if nav := self._navigation("bookmarks", page, len(rows) > PAGE):
-            buttons.append(nav)
-        buttons.append([button("Меню", "start")])
-        await self._reply(update_id, text, keyboard(buttons), sensitive=True)
+        async with self.operations.lock:
+            rows = await self.archive.list_bookmarks(limit=PAGE + 1, offset=page * PAGE)
+            text, buttons = f"Закладки · страница {page + 1}\n", []
+            for row in rows[:PAGE]:
+                text += f"\n#{row['id']} · {preview(row.get('text') or row.get('caption') or '[Нет текста]', 180)}\n"
+                buttons.append([button(f"История #{row['id']}", f"history:{row['id']}")])
+            if not rows:
+                text += "\nЗакладок нет. Добавьте /bookmark ID или откройте историю записи."
+            if nav := self._navigation("bookmarks", page, len(rows) > PAGE):
+                buttons.append(nav)
+            buttons.append([button("Меню", "start")])
+            await self._reply(update_id, text, keyboard(buttons), sensitive=True)
 
     async def _export(
         self,
@@ -877,7 +882,10 @@ class NotificationWorker:
             async with self.operations.lock:
                 final = []
                 for item, _ in ready:
-                    await self._renew(item)
+                    try:
+                        await self._renew(item)
+                    except _NoLease:
+                        continue
                     record, item_due = await self._policy(item)
                     if record is None:
                         await self._finish(item)
@@ -1015,6 +1023,9 @@ class NotificationWorker:
             )
 
     async def run_once(self) -> bool:
+        cooldown = await self.archive.get_setting("notification_cooldown_until", 0)
+        if cooldown > time.time():
+            return False
         job = await self.archive.claim_job("notification", lease_seconds=3600)
         if not job:
             return False
@@ -1063,6 +1074,10 @@ class NotificationWorker:
         except _NoLease:
             pass
         except TelegramError as error:
+            if error.code == 429:
+                await self.archive.set_setting(
+                    "notification_cooldown_until", time.time() + max(1, error.retry_after)
+                )
             state = (
                 "blocked"
                 if error.code == 403

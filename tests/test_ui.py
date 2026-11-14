@@ -549,3 +549,66 @@ async def test_send_pacing_reserves_one_second_between_attempts(context, monkeyp
     await sender._paced()
     await sender._paced()
     assert delays == [1]
+
+
+async def test_aggregate_view_and_erasure_are_serialized(context, monkeypatch):
+    archive, _, operations, commands = context
+    message_id = await store(archive, text="ERASED_PREVIEW")
+    original = archive.list_messages
+    read = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def paused_read(*args, **kwargs):
+        rows = await original(*args, **kwargs)
+        read.set()
+        await resume.wait()
+        return rows
+
+    monkeypatch.setattr(archive, "list_messages", paused_read)
+    view = asyncio.create_task(commands.handle(command("/archive")))
+    await read.wait()
+    erase = asyncio.create_task(operations.erase(message_id))
+    await asyncio.sleep(0)
+    assert not erase.done()
+    resume.set()
+    await view
+    await erase
+    sender = worker(context)
+    assert not await sender.run_once()
+    assert sender.api.sent == []
+
+
+async def test_digest_retains_unrelated_event_when_one_erased(context):
+    archive, _, operations, _ = context
+    first = await store(archive, update_id=1, message_id=1)
+    await store(archive, update_id=2, message_id=2)
+    await store(archive, update_id=3, message_id=1, edit=True, text="first edit")
+    await store(archive, update_id=4, message_id=2, edit=True, text="second edit")
+    await archive.set_setting("digest_minutes", 10)
+    for job in await jobs(archive):
+        await archive.set_setting(
+            f"notification_due:{job['id']}", {"minutes": 10, "due": time.time() - 1}
+        )
+    sender = worker(context)
+    async with operations.lock:
+        task = asyncio.create_task(sender.run_once())
+        for _ in range(100):
+            if all(row["state"] == "running" for row in await jobs(archive)):
+                break
+            await asyncio.sleep(0)
+        await archive.erase_message(first)
+    await task
+    assert len(sender.api.sent) == 1
+    assert "Сводка событий: 1" in sender.api.sent[0][1]
+    assert all(row["state"] == "done" for row in await jobs(archive))
+
+
+async def test_retry_after_blocks_entire_sender(context):
+    archive, _, _, _ = context
+    await archive.enqueue("notification", "text-one", {"text": "one"})
+    await archive.enqueue("notification", "text-two", {"text": "two"})
+    sender = worker(context, FakeAPI(TelegramError(429, retry_after=70)))
+    assert await sender.run_once()
+    assert await archive.get_setting("notification_cooldown_until") >= time.time() + 65
+    assert not await sender.run_once()
+    assert (await jobs(archive))[1]["attempts"] == 0

@@ -477,3 +477,23 @@ async def test_job_heartbeat_and_stale_attempt_fencing(archive, monkeypatch):
     assert not await archive.renew_job(id, first["attempts"], lease_seconds=20)
     assert await archive.finish_job(id, attempts=second["attempts"])
     assert not await archive.retry_job(id, "already_done", 0, attempts=second["attempts"])
+
+
+async def test_owner_reply_recovers_previously_unseen_file(archive):
+    raw = message(1, message_id=20, text="owner reply")
+    raw["business_message"]["from"] = {"id": 99}
+    raw["business_message"]["reply_to_message"] = {
+        "message_id": 19,
+        "date": 1,
+        "chat": {"id": 10},
+        "voice": {"file_id": "previously-unseen", "file_unique_id": "voice-one"},
+        "has_protected_content": True,
+    }
+    await archive.ingest_batch([raw])
+    await archive.apply_update(raw)
+    records = await archive.list_messages()
+    recovered = next(row for row in records if row["message_id"] == 19)
+    history = await archive.history(recovered["id"])
+    assert history["versions"][0]["kind"] == "context"
+    assert history["versions"][0]["payload"]["has_protected_content"] is True
+    assert history["media"][0]["file_id"] == "previously-unseen"

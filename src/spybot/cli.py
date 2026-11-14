@@ -47,18 +47,6 @@ def _parser() -> argparse.ArgumentParser:
     decrypt = sub.add_parser("decrypt", help="Явно расшифровать экспорт в указанный новый файл")
     decrypt.add_argument("source", type=Path)
     decrypt.add_argument("destination", type=Path)
-    legacy = sub.add_parser(
-        "import-legacy", help="Проверить или импортировать старую SQLite без её изменения"
-    )
-    legacy.add_argument("source", type=Path)
-    legacy.add_argument("--media-root", type=Path)
-    legacy.add_argument(
-        "--source-timezone",
-        help="Часовой пояс старых дат без UTC offset; обязателен при их импорте",
-    )
-    legacy.add_argument(
-        "--apply", action="store_true", help="Без этого флага выполняется только dry run"
-    )
     retry = sub.add_parser("retry", help="Повторить ошибочные загрузки и обработку событий")
     retry.add_argument(
         "--include-uncertain",
@@ -142,7 +130,7 @@ async def _execute(args: argparse.Namespace, settings: Settings) -> None:
 
         await run(settings)
         return
-    if not (settings.data_dir / "archive.db").exists() and args.command not in {"import-legacy"}:
+    if not (settings.data_dir / "archive.db").exists():
         raise ConfigurationError("Архив ещё не создан")
     settings.prepare_data_dir()
     with InstanceLock(settings.data_dir / ".instance.lock"):
@@ -158,19 +146,6 @@ async def _execute(args: argparse.Namespace, settings: Settings) -> None:
                     chat_id=args.chat_id, include_media=args.include_media
                 )
                 print(json.dumps({"encrypted_export": str(path), "zip_bytes": size}))
-            elif args.command == "import-legacy":
-                from spybot.legacy import import_legacy
-
-                report = await import_legacy(
-                    archive,
-                    settings,
-                    key,
-                    args.source,
-                    args.media_root or args.source.parent,
-                    args.source_timezone,
-                    apply=args.apply,
-                )
-                print(json.dumps(report, ensure_ascii=False, indent=2))
             elif args.command == "retry":
                 print(
                     json.dumps(await archive.retry_failed(include_uncertain=args.include_uncertain))

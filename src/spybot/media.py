@@ -126,15 +126,18 @@ class MediaWorker:
                 else:
                     await filesystem_call(os.replace, staging, destination)
                     await filesystem_call(fsync_directory, destination.parent)
-                await self.archive.update_media(
+                await self.archive.finish_media_job(
+                    job["id"],
+                    job["attempts"],
                     media["id"],
-                    state="saved",
-                    object_path=relative,
-                    sha256=digest,
-                    size=downloaded,
-                    error=None,
+                    {
+                        "state": "saved",
+                        "object_path": relative,
+                        "sha256": digest,
+                        "size": downloaded,
+                        "error": None,
+                    },
                 )
-                await self.archive.finish_job(job["id"], attempts=job["attempts"])
         except asyncio.CancelledError:
             if writer is not None:
                 await filesystem_call(writer.abort)
@@ -167,13 +170,18 @@ class MediaWorker:
                 and (error.code in {400, 401, 403} or error.code == 404 and job["attempts"] >= 10)
             )
             state = "too_large" if too_large else "unavailable" if terminal else "failed"
-            await self.archive.update_media(media["id"], state=state, error=code)
             delay = max(
                 error.retry_after if isinstance(error, TelegramError) else 0,
                 min(2 ** min(job["attempts"] + 1, 10), 3600),
             )
-            await self.archive.retry_job(
-                job["id"], code, delay, terminal=terminal, attempts=job["attempts"]
+            await self.archive.finish_media_job(
+                job["id"],
+                job["attempts"],
+                media["id"],
+                {"state": state, "error": code},
+                error_code=code,
+                delay=delay,
+                terminal=terminal,
             )
         finally:
             pulse.cancel()
