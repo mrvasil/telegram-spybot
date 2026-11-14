@@ -46,6 +46,11 @@ class Settings:
     @classmethod
     def load(cls, env_file: str | Path | None = ".env") -> Settings:
         if env_file is not None:
+            env_path = Path(env_file)
+            if env_path.exists() and os.name == "posix" and env_path.stat().st_mode & 0o077:
+                raise ConfigurationError(
+                    "Файл .env доступен другим пользователям: установите права 600"
+                )
             load_dotenv(env_file, override=False)
         token = os.getenv("TOKEN", "").strip()
         if not re.fullmatch(r"\d+:[A-Za-z0-9_-]{20,}", token):
@@ -108,6 +113,8 @@ class Settings:
                     "Файл ключа доступен другим пользователям: установите права 600"
                 )
             key = bytes.fromhex(self.key_file.read_text().strip())
+        except ConfigurationError:
+            raise
         except (OSError, ValueError):
             raise ConfigurationError(
                 "Не удалось прочитать ключ архива. Выполните spybot init; существующий ключ не заменяйте"
@@ -118,5 +125,10 @@ class Settings:
 
     def prepare_data_dir(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name == "posix" and self.data_dir.stat().st_mode & 0o077:
+            raise ConfigurationError("DATA_DIR должен иметь права 700")
         for name in ("objects", "staging", "backups", "exports"):
-            (self.data_dir / name).mkdir(exist_ok=True, mode=0o700)
+            directory = self.data_dir / name
+            directory.mkdir(exist_ok=True, mode=0o700)
+            if os.name == "posix" and directory.stat().st_mode & 0o077:
+                raise ConfigurationError("Подкаталоги DATA_DIR должны иметь права 700")

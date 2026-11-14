@@ -298,6 +298,10 @@ async def test_application_failure_rolls_back_all_side_effects(archive, monkeypa
         "pending_media": 0,
         "inbox_pending": 1,
         "jobs_pending": 0,
+        "jobs_attention": 0,
+        "jobs_uncertain": 0,
+        "media_attention": 0,
+        "last_received_at": pytest.approx(time.time(), abs=5),
     }
     monkeypatch.setattr(archive, "_enqueue", original)
     await archive.apply_update(update)

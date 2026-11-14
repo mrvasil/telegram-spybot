@@ -420,33 +420,48 @@ class Archive:
             return await self._enqueue(kind, key, payload)
 
     async def claim_job(self, kind: str, lease_seconds: float = 300) -> dict | None:
+        rows = await self._claim_jobs(kind, 1, lease_seconds, event_only=False)
+        return rows[0] if rows else None
+
+    async def claim_notification_events(
+        self, limit: int = 20, lease_seconds: float = 300
+    ) -> list[dict]:
+        return await self._claim_jobs(
+            "notification", min(max(limit, 1), 50), lease_seconds, event_only=True
+        )
+
+    async def _claim_jobs(
+        self, kind: str, limit: int, lease_seconds: float, *, event_only: bool
+    ) -> list[dict]:
         if lease_seconds <= 0:
             raise ValueError("lease_must_be_positive")
         async with self._transaction():
             now = time.time()
-            # An expired send may have reached Telegram. Never automatically duplicate it.
             await self._db.execute(
                 "UPDATE jobs SET state=CASE WHEN kind='notification' THEN 'uncertain' ELSE 'pending' END,lease_until=NULL,last_error='lease_expired' "
                 "WHERE state='running' AND lease_until<=?",
                 (now,),
             )
-            row = await self._one(
-                "SELECT * FROM jobs WHERE kind=? AND state='pending' AND available_at<=? ORDER BY id LIMIT 1",
-                (kind, now),
+            rows = await self._all(
+                "SELECT * FROM jobs WHERE kind=? AND state='pending' AND available_at<=? "
+                "AND (?=0 OR json_extract(payload,'$.event') IN ('edit','delete')) ORDER BY id LIMIT ?",
+                (kind, now, event_only, limit),
             )
-            if not row:
-                return None
-            await self._db.execute(
-                "UPDATE jobs SET state='running',attempts=attempts+1,lease_until=? WHERE id=?",
-                (now + lease_seconds, row["id"]),
-            )
-            return {
-                **row,
-                "state": "running",
-                "attempts": row["attempts"] + 1,
-                "lease_until": now + lease_seconds,
-                "payload": json.loads(row["payload"]),
-            }
+            for row in rows:
+                await self._db.execute(
+                    "UPDATE jobs SET state='running',attempts=attempts+1,lease_until=? WHERE id=?",
+                    (now + lease_seconds, row["id"]),
+                )
+            return [
+                {
+                    **row,
+                    "state": "running",
+                    "attempts": row["attempts"] + 1,
+                    "lease_until": now + lease_seconds,
+                    "payload": json.loads(row["payload"]),
+                }
+                for row in rows
+            ]
 
     async def renew_job(self, id: int, attempts: int, lease_seconds: float = 300) -> bool:
         if lease_seconds <= 0:
@@ -562,6 +577,55 @@ class Archive:
                 ("global" if chat_id is None else str(chat_id), key, _json(value)),
             )
 
+    async def set_bookmark(self, id: int, desired: bool) -> bool:
+        async with self._transaction():
+            if not await self._one("SELECT 1 FROM messages WHERE id=?", (id,)):
+                return False
+            await self._db.execute(
+                "INSERT INTO settings(scope,key,value) VALUES(?,'bookmark',?) ON CONFLICT(scope,key) DO UPDATE SET value=excluded.value",
+                (f"message:{id}", _json(bool(desired))),
+            )
+            return True
+
+    async def list_bookmarks(self, limit: int = 20, offset: int = 0) -> list[dict]:
+        async with self._lock:
+            return await self._all(
+                "SELECT m.*,v.text,v.caption,v.source_date,v.kind FROM messages m "
+                "JOIN settings s ON s.scope='message:' || m.id AND s.key='bookmark' AND s.value='true' "
+                "LEFT JOIN versions v ON v.id=m.latest_version_id ORDER BY m.id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            )
+
+    async def retry_failed(self, *, include_uncertain: bool = False) -> dict:
+        """Owner action. Ambiguous sends require a second, explicit opt-in."""
+        async with self._transaction():
+            predicate = "(state IN ('failed','blocked') OR (? AND state='uncertain'))"
+            rows = await self._all(
+                "SELECT id,state FROM jobs WHERE " + predicate, (include_uncertain,)
+            )
+            uncertain = sum(row["state"] == "uncertain" for row in rows)
+            await self._db.execute(
+                "UPDATE media SET state='pending',error=NULL WHERE state<>'saved' AND id IN (SELECT json_extract(payload,'$.media_id') FROM jobs WHERE kind='media' AND "
+                + predicate
+                + ")",
+                (include_uncertain,),
+            )
+            await self._db.execute(
+                "UPDATE jobs SET state='pending',available_at=0,lease_until=NULL,last_error=NULL WHERE "
+                + predicate,
+                (include_uncertain,),
+            )
+            pending = await self._one("SELECT COUNT(*) AS count FROM inbox WHERE state='pending'")
+            assert pending is not None
+            await self._db.execute(
+                "UPDATE inbox SET retry_at=0,last_error=NULL WHERE state='pending'"
+            )
+            return {
+                "jobs": len(rows),
+                "uncertain_notifications": uncertain,
+                "updates": pending["count"],
+            }
+
     async def stats(self) -> dict:
         async with self._lock:
             row = await self._one("""SELECT
@@ -571,7 +635,11 @@ class Archive:
               (SELECT COUNT(*) FROM media) AS media,
               (SELECT COUNT(*) FROM media WHERE state='pending') AS pending_media,
               (SELECT COUNT(*) FROM inbox WHERE state='pending') AS inbox_pending,
-              (SELECT COUNT(*) FROM jobs WHERE state IN ('pending','running')) AS jobs_pending""")
+              (SELECT COUNT(*) FROM jobs WHERE state IN ('pending','running')) AS jobs_pending,
+              (SELECT COUNT(*) FROM jobs WHERE state IN ('failed','blocked','uncertain')) AS jobs_attention,
+              (SELECT COUNT(*) FROM jobs WHERE state='uncertain') AS jobs_uncertain,
+              (SELECT COUNT(*) FROM media WHERE state IN ('failed','unavailable','too_large')) AS media_attention,
+              (SELECT MAX(received_at) FROM inbox) AS last_received_at""")
             assert row is not None
             return row
 
@@ -682,6 +750,10 @@ class Archive:
                     await self._db.execute(
                         "UPDATE versions SET payload=? WHERE id=?", (_json(sanitized), row["id"])
                     )
+        await self._db.execute(
+            "DELETE FROM jobs WHERE kind='notification' AND json_extract(payload,'$.archive_sensitive')=1"
+        )
+        await self._db.execute("DELETE FROM settings WHERE scope=?", (f"message:{id}",))
         await self._db.execute("DELETE FROM messages WHERE id=?", (id,))
         return list(dict.fromkeys(paths))
 
