@@ -612,3 +612,74 @@ async def test_retry_after_blocks_entire_sender(context):
     assert await archive.get_setting("notification_cooldown_until") >= time.time() + 65
     assert not await sender.run_once()
     assert (await jobs(archive))[1]["attempts"] == 0
+
+
+@pytest.mark.parametrize("view_name", ["history", "files"])
+async def test_record_view_serializes_nested_context_erasure(context, monkeypatch, view_name):
+    archive, _, operations, commands = context
+    child = await store(archive, text="ERASED_NESTED_MARKER")
+    child_payload = (await archive.history(child))["versions"][0]["payload"]
+    parent = await store(
+        archive,
+        update_id=2,
+        message_id=2,
+        text=None,
+        reply_to_message=child_payload,
+        document={"file_id": "synthetic", "file_unique_id": "unique"},
+    )
+    original = archive.history
+    read, resume = asyncio.Event(), asyncio.Event()
+
+    async def paused_history(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        read.set()
+        await resume.wait()
+        return result
+
+    monkeypatch.setattr(archive, "history", paused_history)
+    coroutine = (
+        commands._history(100, parent)
+        if view_name == "history"
+        else commands._files(100, parent, 0)
+    )
+    view = asyncio.create_task(coroutine)
+    await asyncio.wait_for(read.wait(), 2)
+    erase = asyncio.create_task(operations.erase(child))
+    await asyncio.sleep(0)
+    blocked = not erase.done()
+    resume.set()
+    await asyncio.gather(view, erase)
+    assert blocked
+    monkeypatch.setattr(archive, "history", original)
+    assert await archive.history(parent)
+    assert await archive.history(child) is None
+    sender = worker(context)
+    assert not await sender.run_once()
+    assert sender.api.sent == []
+
+
+async def test_retention_invalidates_export_of_text_only_message(context, monkeypatch):
+    archive, settings, operations, _ = context
+    await store(archive, text="PRUNED_EXPORT_MARKER")
+    path, _ = await operations.export()
+    await archive.enqueue(
+        "notification",
+        "test-export",
+        {
+            "export_path": str(path.relative_to(settings.data_dir)),
+        },
+    )
+    await archive.set_setting("retention_days", 1)
+
+    async def end_iteration(delay):
+        raise asyncio.CancelledError
+
+    with monkeypatch.context() as patch:
+        patch.setattr("spybot.operations.asyncio.sleep", end_iteration)
+        with pytest.raises(asyncio.CancelledError):
+            await operations.run()
+    assert (await archive.stats())["messages"] == 0
+    assert not path.exists()
+    sender = worker(context)
+    await sender.run_once()
+    assert sender.api.documents == []

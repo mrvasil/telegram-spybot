@@ -845,7 +845,7 @@ class Archive:
         await self._db.execute("DELETE FROM messages WHERE id=?", (id,))
         return list(dict.fromkeys(paths))
 
-    async def prune(self, before_timestamp: float) -> list[str]:
+    async def prune(self, before_timestamp: float) -> tuple[int, list[str]]:
         """Explicit destructive retention; never called automatically by the archive."""
         async with self._transaction():
             rows = await self._all(
@@ -855,7 +855,7 @@ class Archive:
             paths = []
             for row in rows:
                 paths.extend(await self._erase_message(row["id"]))
-            return list(dict.fromkeys(paths))
+            return len(rows), list(dict.fromkeys(paths))
 
     async def backup_to(self, path: Path) -> None:
         """Write a consistent encrypted snapshot; fail if the destination exists."""

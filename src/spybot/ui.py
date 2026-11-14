@@ -486,70 +486,72 @@ class Commands:
             await self._reply(update_id, text, keyboard(buttons), sensitive=True)
 
     async def _history(self, update_id: int, message_id: int, index: int | None = None) -> None:
-        history = await self.archive.history(message_id)
-        if history is None:
-            await self._reply(update_id, "Запись не найдена или была стёрта локально.")
-            return
-        index = len(history["versions"]) - 1 if index is None else index
-        if history["versions"] and not 0 <= index < len(history["versions"]):
-            raise ValueError("Версия не найдена.")
-        marked = await self.archive.get_setting("bookmark", False, message_id_scope(message_id))
-        rows = []
-        if history["versions"]:
-            nav = []
-            if index:
-                nav.append(button("← Предыдущая версия", f"history:{message_id}:{index - 1}"))
-            if index + 1 < len(history["versions"]):
-                nav.append(button("Следующая версия →", f"history:{message_id}:{index + 1}"))
-            if nav:
-                rows.append(nav)
-        if history["media"]:
-            rows.append([button(f"Файлы ({len(history['media'])})", f"files:{message_id}:0")])
-        rows.extend(
-            [
-                [button("Экспорт записи", f"export:{message_id}")],
+        async with self.operations.lock:
+            history = await self.archive.history(message_id)
+            if history is None:
+                await self._reply(update_id, "Запись не найдена или была стёрта локально.")
+                return
+            index = len(history["versions"]) - 1 if index is None else index
+            if history["versions"] and not 0 <= index < len(history["versions"]):
+                raise ValueError("Версия не найдена.")
+            marked = await self.archive.get_setting("bookmark", False, message_id_scope(message_id))
+            rows = []
+            if history["versions"]:
+                nav = []
+                if index:
+                    nav.append(button("← Предыдущая версия", f"history:{message_id}:{index - 1}"))
+                if index + 1 < len(history["versions"]):
+                    nav.append(button("Следующая версия →", f"history:{message_id}:{index + 1}"))
+                if nav:
+                    rows.append(nav)
+            if history["media"]:
+                rows.append([button(f"Файлы ({len(history['media'])})", f"files:{message_id}:0")])
+            rows.extend(
                 [
-                    button(
-                        "Убрать закладку" if marked else "В закладки",
-                        f"bookmark:{message_id}:{0 if marked else 1}",
-                    )
-                ],
-                [button("Стереть локально…", f"delete:{message_id}"), button("Меню", "start")],
-            ]
-        )
-        await self._reply(
-            update_id,
-            history_text(history, index, self.settings.timezone),
-            keyboard(rows),
-            message_id=message_id,
-            sensitive=True,
-        )
+                    [button("Экспорт записи", f"export:{message_id}")],
+                    [
+                        button(
+                            "Убрать закладку" if marked else "В закладки",
+                            f"bookmark:{message_id}:{0 if marked else 1}",
+                        )
+                    ],
+                    [button("Стереть локально…", f"delete:{message_id}"), button("Меню", "start")],
+                ]
+            )
+            await self._reply(
+                update_id,
+                history_text(history, index, self.settings.timezone),
+                keyboard(rows),
+                message_id=message_id,
+                sensitive=True,
+            )
 
     async def _files(self, update_id: int, message_id: int, page: int) -> None:
-        history = await self.archive.history(message_id)
-        if not history:
-            await self._reply(update_id, "Запись больше не существует.")
-            return
-        media = history["media"]
-        current = media[page * PAGE : (page + 1) * PAGE]
-        text = f"Вложения записи #{message_id} · страница {page + 1}\n\n" + (
-            "\n".join(media_status(row) for row in current) or "На этой странице файлов нет."
-        )
-        rows = [
-            [button(f"Получить файл #{row['id']}", f"media:{message_id}:{row['id']}")]
-            for row in current
-        ]
-        if nav := self._navigation(f"files:{message_id}", page, len(media) > (page + 1) * PAGE):
-            rows.append(nav)
-        rows.append([button("История", f"history:{message_id}")])
-        await self._reply(
-            update_id,
-            text
-            + "\n\nНедоступные файлы нельзя восстановить из одного file_id. /retry повторяет безопасные ошибки загрузки.",
-            keyboard(rows),
-            message_id=message_id,
-            sensitive=True,
-        )
+        async with self.operations.lock:
+            history = await self.archive.history(message_id)
+            if not history:
+                await self._reply(update_id, "Запись больше не существует.")
+                return
+            media = history["media"]
+            current = media[page * PAGE : (page + 1) * PAGE]
+            text = f"Вложения записи #{message_id} · страница {page + 1}\n\n" + (
+                "\n".join(media_status(row) for row in current) or "На этой странице файлов нет."
+            )
+            rows = [
+                [button(f"Получить файл #{row['id']}", f"media:{message_id}:{row['id']}")]
+                for row in current
+            ]
+            if nav := self._navigation(f"files:{message_id}", page, len(media) > (page + 1) * PAGE):
+                rows.append(nav)
+            rows.append([button("История", f"history:{message_id}")])
+            await self._reply(
+                update_id,
+                text
+                + "\n\nНедоступные файлы нельзя восстановить из одного file_id. /retry повторяет безопасные ошибки загрузки.",
+                keyboard(rows),
+                message_id=message_id,
+                sensitive=True,
+            )
 
     async def _settings(self, update_id: int, chat_id: int | None) -> None:
         scope = "g" if chat_id is None else str(chat_id)

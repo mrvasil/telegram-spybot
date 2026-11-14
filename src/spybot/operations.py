@@ -314,9 +314,12 @@ class Operations:
             referenced = await self.archive.object_paths()
             for path in set(paths) - referenced:
                 object_path(self.settings.data_dir, path).unlink(missing_ok=True)
-            # Existing export snapshots may contain the erased message; invalidate all.
-            for export in (self.settings.data_dir / "exports").glob("*.sba"):
-                export.unlink(missing_ok=True)
+            self._invalidate_exports()
+
+    def _invalidate_exports(self) -> None:
+        # Call only under self.lock: snapshots can contain erased nested context.
+        for export in (self.settings.data_dir / "exports").glob("*.sba"):
+            export.unlink(missing_ok=True)
 
     async def run(self) -> None:
         while True:
@@ -338,7 +341,9 @@ class Operations:
                 )
                 if days > 0:
                     async with self.lock:
-                        paths = await self.archive.prune(now - days * 86400)
+                        erased_count, paths = await self.archive.prune(now - days * 86400)
+                        if erased_count:
+                            self._invalidate_exports()
                         referenced = await self.archive.object_paths()
                         for path in set(paths) - referenced:
                             object_path(self.settings.data_dir, path).unlink(missing_ok=True)
