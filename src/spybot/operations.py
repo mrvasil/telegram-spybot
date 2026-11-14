@@ -31,6 +31,8 @@ from spybot.media import object_path
 
 logger = logging.getLogger(__name__)
 
+_EXPORT_HEARTBEAT_SECONDS = 60.0
+
 
 class _EncryptedSink(io.RawIOBase):
     def __init__(self, writer: EncryptedWriter):
@@ -151,19 +153,35 @@ class Operations:
 
     async def _snapshot(self) -> tuple[Path, Archive]:
         path = self.settings.data_dir / "staging" / f"{uuid4().hex}.snapshot"
-        await self.archive.backup_to(path)
+        backup = asyncio.create_task(self.archive.backup_to(path))
         try:
+            try:
+                await asyncio.shield(backup)
+            except asyncio.CancelledError:
+                # Native backup runs on aiosqlite's worker and cannot be interrupted.
+                # Finish it before cleanup, otherwise it may recreate the removed file.
+                try:
+                    await backup
+                except Exception:
+                    pass
+                raise
             snapshot = await Archive.open(path, self.key, self.settings.owner_id)
         except BaseException:
-            path.unlink(missing_ok=True)
+            self._remove_snapshot(path)
             raise
         return path, snapshot
 
     @staticmethod
-    async def _close_snapshot(path: Path, snapshot: Archive) -> None:
-        await snapshot.close()
+    def _remove_snapshot(path: Path) -> None:
         for suffix in ("", "-wal", "-shm"):
             Path(str(path) + suffix).unlink(missing_ok=True)
+
+    @staticmethod
+    async def _close_snapshot(path: Path, snapshot: Archive) -> None:
+        try:
+            await snapshot.close()
+        finally:
+            Operations._remove_snapshot(path)
 
     async def backup(self) -> Path:
         async with self.lock:
@@ -218,8 +236,9 @@ class Operations:
         async with self.lock:
             path, snapshot = await self._snapshot()
             destination = self.settings.data_dir / "exports" / f"{uuid4().hex}.sba"
-            writer = EncryptedWriter(destination, self.key)
+            writer = None
             try:
+                writer = EncryptedWriter(destination, self.key)
                 with zipfile.ZipFile(
                     _EncryptedSink(writer), "w", compression=zipfile.ZIP_DEFLATED
                 ) as archive:
@@ -269,7 +288,9 @@ class Operations:
                 _, size = writer.finish()
                 return destination, size
             except BaseException:
-                writer.abort()
+                if writer is not None:
+                    writer.abort()
+                destination.unlink(missing_ok=True)
                 raise
             finally:
                 await self._close_snapshot(path, snapshot)
@@ -336,10 +357,16 @@ class Operations:
         job = await self.archive.claim_job("export", lease_seconds=3600)
         if job is None:
             return
+        lost_lease = asyncio.Event()
+        heartbeat = asyncio.create_task(self._keep_export_lease(job, lost_lease))
         try:
             payload = job["payload"]
             if payload.get("action") == "backup":
                 await self.backup()
+                if lost_lease.is_set() or not await self.archive.renew_job(
+                    job["id"], job["attempts"], 3600
+                ):
+                    return
                 await self.archive.enqueue(
                     "notification",
                     f"backup-ready:{job['id']}",
@@ -351,6 +378,10 @@ class Operations:
                     include_media=payload.get("include_media", False),
                     message_id=payload.get("message_id"),
                 )
+                if lost_lease.is_set() or not await self.archive.renew_job(
+                    job["id"], job["attempts"], 3600
+                ):
+                    return
                 limit = (
                     1_900_000_000
                     if self.settings.api_url != "https://api.telegram.org"
@@ -373,10 +404,33 @@ class Operations:
                             "filename": "telegram-archive.zip",
                         },
                     )
-            await self.archive.finish_job(job["id"], attempts=job["attempts"])
+            if not lost_lease.is_set() and await self.archive.renew_job(
+                job["id"], job["attempts"], 3600
+            ):
+                await self.archive.finish_job(job["id"], attempts=job["attempts"])
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            await self.archive.retry_job(
-                job["id"], type(error).__name__, 60, attempts=job["attempts"]
-            )
+            if not lost_lease.is_set() and await self.archive.renew_job(
+                job["id"], job["attempts"], 3600
+            ):
+                await self.archive.retry_job(
+                    job["id"], type(error).__name__, 60, attempts=job["attempts"]
+                )
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+
+    async def _keep_export_lease(self, job: dict, lost_lease: asyncio.Event) -> None:
+        try:
+            while True:
+                await asyncio.sleep(_EXPORT_HEARTBEAT_SECONDS)
+                if not await self.archive.renew_job(job["id"], job["attempts"], 3600):
+                    lost_lease.set()
+                    return
+        except Exception as error:
+            lost_lease.set()
+            logger.error("export_lease_error type=%s", type(error).__name__)

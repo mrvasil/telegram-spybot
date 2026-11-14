@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -88,16 +89,104 @@ def test_restore_rejects_traversal_before_overwriting(tmp_path):
         archive.writestr(
             "manifest.json",
             json.dumps(
-                {"format": 1, "files": {"archive.db": {"bytes": 1}, "../outside": {"bytes": 1}}}
+                {
+                    "format": 1,
+                    "files": {
+                        name: {"bytes": 1, "sha256": hashlib.sha256(b"x").hexdigest()}
+                        for name in ("archive.db", "objects/../../outside")
+                    },
+                }
             ),
         )
         archive.writestr("archive.db", "x")
-        archive.writestr("../outside", "x")
+        archive.writestr("objects/../../outside", "x")
     path = tmp_path / "bad"
     writer = EncryptedWriter(path, key)
     writer.write(payload.getvalue())
     writer.finish()
-    with pytest.raises((ValueError, KeyError)):
+    with pytest.raises(ValueError, match="Unsafe backup path"):
         restore_backup(path, tmp_path / "destination", key)
     assert not (tmp_path / "outside").exists()
     assert not (tmp_path / "destination").exists()
+
+
+async def test_cancel_snapshot_waits_for_backup_and_removes_sidecars(environment, monkeypatch):
+    archive, settings, _, operations = environment
+    created = asyncio.Event()
+    release = asyncio.Event()
+    original = archive.backup_to
+
+    async def paused_backup(path):
+        await original(path)
+        for suffix in ("-wal", "-shm"):
+            type(path)(str(path) + suffix).touch()
+        created.set()
+        await release.wait()
+
+    monkeypatch.setattr(archive, "backup_to", paused_backup)
+    task = asyncio.create_task(operations.backup())
+    await created.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    waiting = not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert waiting, "cleanup must await outstanding native snapshot work"
+    assert list((settings.data_dir / "staging").iterdir()) == []
+
+
+async def test_export_constructor_failure_closes_snapshot(environment, monkeypatch):
+    _, settings, _, operations = environment
+
+    def fail_writer(*_):
+        raise OSError("synthetic constructor failure")
+
+    monkeypatch.setattr("spybot.operations.EncryptedWriter", fail_writer)
+    with pytest.raises(OSError, match="constructor"):
+        await operations.export()
+    assert list((settings.data_dir / "staging").iterdir()) == []
+
+
+async def test_export_job_renews_lease_while_working(environment, monkeypatch):
+    archive, settings, _, operations = environment
+    renewed = asyncio.Event()
+    original = archive.renew_job
+    renewals = []
+
+    async def renew(id, attempts, lease_seconds):
+        renewals.append((id, attempts, lease_seconds))
+        result = await original(id, attempts, lease_seconds)
+        renewed.set()
+        return result
+
+    async def waiting_export(**_):
+        await asyncio.wait_for(renewed.wait(), 1)
+        return settings.data_dir / "exports" / "synthetic.sba", 10
+
+    monkeypatch.setattr(archive, "renew_job", renew)
+    monkeypatch.setattr(operations, "export", waiting_export)
+    monkeypatch.setattr("spybot.operations._EXPORT_HEARTBEAT_SECONDS", 0.001)
+    job_id = await archive.enqueue("export", "synthetic-export", {})
+    await operations._export_job()
+    assert len(renewals) >= 3
+    assert all(row == (job_id, 1, 3600) for row in renewals)
+    notification = await archive.claim_job("notification")
+    assert notification["payload"]["export_path"] == "exports/synthetic.sba"
+    assert await archive.claim_job("export") is None
+
+
+async def test_export_job_does_not_publish_or_revive_expired_lease(environment, monkeypatch):
+    archive, settings, _, operations = environment
+    job_id = await archive.enqueue("export", "expired-export", {})
+
+    async def expired_export(**_):
+        async with archive._transaction():
+            await archive._db.execute("UPDATE jobs SET lease_until=0 WHERE id=?", (job_id,))
+        return settings.data_dir / "exports" / "synthetic.sba", 10
+
+    monkeypatch.setattr(operations, "export", expired_export)
+    await operations._export_job()
+    assert await archive.claim_job("notification") is None
+    reclaimed = await archive.claim_job("export")
+    assert reclaimed["id"] == job_id and reclaimed["attempts"] == 2
