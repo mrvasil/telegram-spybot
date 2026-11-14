@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import difflib
 import html
-import json
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -55,35 +55,72 @@ def preview(value: str | None, limit: int = 700) -> str:
     return text[:limit] + "\n[…предпросмотр; полная запись — в экспорте]"
 
 
+MEDIA_LABELS = {
+    "photo": "Фото",
+    "video": "Видео",
+    "animation": "GIF",
+    "voice": "Голосовое",
+    "video_note": "Видеосообщение",
+    "audio": "Аудио",
+    "document": "Файл",
+    "sticker": "Стикер",
+}
+
+
+def safe(value: object, limit: int = 1600) -> str:
+    """Escape user content and bound UTF-16/HTML length without cutting tags/entities."""
+    parts = escaped_parts(str(value), limit)
+    return parts[0] + ("…" if len(parts) > 1 else "")
+
+
+def primary_media(history: dict, version_id: int | None = None) -> list[dict]:
+    """Visible attachments, excluding thumbnails and alternate photo sizes."""
+    if version_id is None and history["versions"]:
+        version_id = history["versions"][-1]["id"]
+    rows = [m for m in history["media"] if m["version_id"] == version_id]
+    result, photos = [], []
+    for media in rows:
+        path = (media.get("metadata") or {}).get("path", "")
+        if re.fullmatch(r"/photo/\d+", path):
+            photos.append(media)
+        elif path in {"/" + kind for kind in MEDIA_LABELS if kind != "photo"}:
+            result.append(media)
+    if photos:
+
+        def quality(media):
+            data = (media.get("metadata") or {}).get("file") or {}
+            return (data.get("width", 0) * data.get("height", 0), data.get("file_size", 0))
+
+        result.insert(0, max(photos, key=quality))
+    return result
+
+
 def content(version: dict) -> str:
+    raw = version.get("payload") or {}
     values = [version.get("text"), version.get("caption")]
     text = "\n".join(value for value in values if isinstance(value, str) and value)
+    labels = [label for key, label in MEDIA_LABELS.items() if raw.get(key)]
+    if labels:
+        return " · ".join(labels) + ("\n" + text if text else "")
     if text:
         return text
-    raw = version.get("payload") or {}
-    # Show unknown keys rather than pretending a new message type is empty.
-    known_metadata = {
-        "message_id",
-        "date",
-        "edit_date",
-        "chat",
-        "from",
-        "sender_chat",
-        "business_connection_id",
-        "text",
-        "caption",
-        "entities",
-        "caption_entities",
-    }
-    fields = [str(key) for key in raw if key not in known_metadata]
-    if not fields:
-        return "[Текст отсутствует; исходные поля сохранены в экспорте JSONL]"
-    return (
-        "[Структурированное сообщение: "
-        + ", ".join(fields)
-        + "]\n"
-        + json.dumps({key: raw[key] for key in fields}, ensure_ascii=False, indent=2)
-    )
+    if raw.get("poll"):
+        return "Опрос: " + str(raw["poll"].get("question", ""))
+    if raw.get("contact"):
+        contact = raw["contact"]
+        return (
+            "Контакт: "
+            + " ".join(
+                str(contact.get(k) or "") for k in ("first_name", "last_name", "phone_number")
+            ).strip()
+        )
+    if raw.get("location") or raw.get("venue"):
+        return "Геопозиция" + (
+            ": " + str(raw["venue"].get("title", "")) if raw.get("venue") else ""
+        )
+    if raw.get("dice"):
+        return str(raw["dice"].get("emoji", "🎲")) + " " + str(raw["dice"].get("value", ""))
+    return "Сообщение без текста · содержимое доступно в экспорте"
 
 
 def changed_envelope(version: dict) -> dict:
@@ -105,86 +142,87 @@ def edit_visible(previous: dict | None, current: dict, threshold: int) -> bool:
     return (1 - difflib.SequenceMatcher(None, old, new, autojunk=False).ratio()) * 100 >= threshold
 
 
-def difference(previous: dict | None, current: dict, limit: int = 850) -> str:
+def difference(previous: dict | None, current: dict, limit: int = 900) -> str:
+    new = safe(content(current), limit)
     if previous is None:
-        return "Предыдущая версия не была доступна боту."
-    old, new = content(previous), content(current)
-    if old == new:
-        return "Изменены вложения, форматирование или другие поля. Полные поля — в JSONL."
-    diff = "\n".join(
-        difflib.unified_diff(
-            old.splitlines(), new.splitlines(), fromfile="до", tofile="после", lineterm=""
-        )
+        return f"<b>Стало</b>\n<blockquote>{new}</blockquote>\n<i>Предыдущая версия недоступна.</i>"
+    old = safe(content(previous), limit)
+    if content(previous) == content(current):
+        return f"<blockquote>{new}</blockquote>\n<i>Изменены вложения или оформление.</i>"
+    return (
+        f"<b>Было</b>\n<blockquote>{old}</blockquote>\n<b>Стало</b>\n<blockquote>{new}</blockquote>"
     )
-    return "Разница (− до, + после):\n" + preview(diff, limit)
 
 
 def media_status(media: dict) -> str:
     states = {
-        "saved": "сохранён",
-        "pending": "в очереди",
-        "failed": "ошибка; /retry",
-        "unavailable": "недоступен Telegram",
-        "too_large": "превышен лимит",
+        "saved": "сохранено",
+        "pending": "загружается",
+        "failed": "не удалось скачать",
+        "unavailable": "Telegram не отдал файл",
+        "too_large": "превышен лимит загрузки",
     }
     metadata = (media.get("metadata") or {}).get("file") or {}
-    name = str(metadata.get("file_name") or media.get("kind") or "файл")
-    return f"#{media['id']} {preview(name, 90)} — {states.get(media['state'], media['state'])}"
+    name = str(metadata.get("file_name") or MEDIA_LABELS.get(str(media.get("kind")), "Вложение"))
+    return f"{preview(name, 70)} · {states.get(media['state'], 'ожидает загрузки')}"
+
+
+def _header(history: dict, title: str, date: float | None, timezone: str) -> str:
+    message = history["message"]
+    chat = safe(message.get("chat_title") or message["chat_id"], 180)
+    parts = timestamp(date, timezone).split()
+    date_text = f"{parts[0]} · {parts[1][:5]}" if len(parts) >= 3 else "время неизвестно"
+    return f"<b>{title}</b> · {chat}\n<i>{safe(date_text, 80)}</i>"
+
+
+def _media_summary(history: dict, version_id: int | None) -> str:
+    media = primary_media(history, version_id)
+    if not media:
+        return ""
+    states = ["Сохранено" if m["state"] == "saved" else media_status(m) for m in media]
+    return "\n\n<i>" + safe(" · ".join(dict.fromkeys(states)), 260) + "</i>"
 
 
 def history_text(history: dict, index: int, timezone: str) -> str:
     message, versions = history["message"], history["versions"]
-    header = f"Запись #{message['id']} · {message.get('chat_title') or message['chat_id']}\n"
-    header += f"Чат {message['chat_id']} · исходный номер {message['message_id']}\n"
-    if message.get("sender_name") or message.get("sender_id"):
-        header += f"Отправитель: {message.get('sender_name') or message['sender_id']}\n"
-    if message.get("deleted_at") is not None:
-        header += "Удалено в Telegram · " + timestamp(message["deleted_at"], timezone) + "\n"
-        header += "Telegram не сообщает, кто удалил сообщение.\n"
     if not versions:
         return (
-            header
-            + "\nИсходник недоступен: бот получил только событие удаления.\nЭто запись о факте удаления, содержание восстановить нельзя."
+            _header(history, "Удалено", message.get("deleted_at"), timezone)
+            + "\n\nИсходник недоступен — бот получил только событие удаления."
         )
     version = versions[index]
-    labels = {"original": "исходная", "edit": "редакция", "context": "снимок из контекста"}
-    result = (
-        header
-        + f"\nВерсия {index + 1}/{len(versions)} · {labels.get(version['kind'], version['kind'])}\n"
-    )
-    result += timestamp(version["source_date"], timezone) + "\n\n" + preview(content(version), 1600)
+    title = "Удалено" if message.get("deleted_at") is not None else "Сообщение"
+    result = _header(history, title, version["source_date"], timezone)
+    if len(versions) > 1:
+        result += f" · <i>Версия {index + 1} из {len(versions)}</i>"
+    result += "\n\n"
     if version["kind"] == "edit":
-        result += "\n\n" + difference(versions[index - 1] if index else None, version)
-    if history["media"]:
-        result += f"\n\nВложения всех версий: {len(history['media'])}. Откройте «Файлы»."
-    result += "\n\nИстория показывает предпросмотр версии. Полные тексты, поля и события — «Экспорт записи»."
-    return result
+        result += difference(versions[index - 1] if index else None, version)
+    else:
+        result += f"<blockquote>{safe(content(version))}</blockquote>"
+    return result + _media_summary(history, version["id"])
 
 
 def event_text(history: dict, event: str, version_id: int | None, timezone: str) -> str:
     message, versions = history["message"], history["versions"]
-    result = "Сообщение изменено" if event == "edit" else "Сообщение удалено в Telegram"
-    result += f" · #{message['id']}\nЧат: {message.get('chat_title') or message['chat_id']}\n"
     index = next(
         (i for i, version in enumerate(versions) if version["id"] == version_id), len(versions) - 1
     )
-    if event == "delete":
-        result += "Telegram не сообщает, кто удалил сообщение.\n"
+    title = "Изменено" if event == "edit" else "Удалено"
+    date = (
+        message.get("deleted_at")
+        if event == "delete"
+        else versions[index]["source_date"]
+        if index >= 0
+        else None
+    )
+    result = _header(history, title, date, timezone)
     if index < 0:
-        return result + "Исходник недоступен; сохранён только факт удаления."
+        return result + "\n\nИсходник недоступен — бот получил только событие удаления."
     current = versions[index]
-    result += timestamp(current["source_date"], timezone) + "\n\n"
+    result += "\n\n"
     if event == "edit":
-        previous = versions[index - 1] if index else None
-        result += "До:\n" + (
-            preview(content(previous), 650) if previous else "[Исходник недоступен]"
-        )
-        result += "\n\nПосле:\n" + preview(content(current), 650)
-        result += "\n\n" + difference(previous, current, 500)
+        result += difference(versions[index - 1] if index else None, current)
     else:
-        result += "Последняя сохранённая версия:\n" + preview(content(current), 1200)
-    if history["media"]:
-        result += "\n\nФайлы: " + "; ".join(media_status(media) for media in history["media"][:4])
-        if len(history["media"]) > 4:
-            result += f"; ещё {len(history['media']) - 4} — в истории."
-    return result + "\n\nПолная история и файлы — по кнопке ниже."
+        result += f"<blockquote>{safe(content(current), 1200)}</blockquote>"
+    return result + _media_summary(history, current["id"])

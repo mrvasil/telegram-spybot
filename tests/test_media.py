@@ -167,3 +167,43 @@ async def test_primary_media_precedes_previews_without_discarding_them(fixture):
         await archive.finish_job(job["id"], attempts=job["attempts"])
     assert set(order[:2]) == {"main", "large"}
     assert set(order[2:]) == {"thumb", "small"}
+
+
+async def test_delivered_expiring_protected_photo_is_saved_before_and_after_deletion(fixture):
+    archive, settings, key = fixture
+    update = {
+        "update_id": 2,
+        "business_message": {
+            "business_connection_id": "c",
+            "chat": {"id": 2},
+            "message_id": 8,
+            "date": 101,
+            "has_protected_content": True,
+            "has_media_spoiler": True,
+            "ttl_seconds": 5,
+            "photo": [{"file_id": "expiring", "file_size": 7, "width": 100, "height": 100}],
+        },
+    }
+    await archive.ingest_batch([update])
+    await archive.apply_update(update)
+    worker = MediaWorker(archive, API(), settings, key, asyncio.Lock())
+    while await worker.run_once():
+        pass
+    message_id = next(r["id"] for r in await archive.list_messages() if r["message_id"] == 8)
+    media = (await archive.message_media(message_id))[0]
+    assert media["state"] == "saved"
+    deletion = {
+        "update_id": 3,
+        "deleted_business_messages": {
+            "business_connection_id": "c",
+            "chat": {"id": 2},
+            "message_ids": [8],
+        },
+    }
+    await archive.ingest_batch([deletion])
+    await archive.apply_update(deletion)
+    assert (
+        b"".join(decrypt_chunks(object_path(settings.data_dir, media["object_path"]), key))
+        == b"content"
+    )
+    assert (await archive.history(message_id))["versions"][0]["payload"]["ttl_seconds"] == 5

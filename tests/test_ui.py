@@ -22,6 +22,7 @@ class FakeAPI:
     def __init__(self, error=None):
         self.sent = []
         self.documents = []
+        self.media_sent = []
         self.calls = []
         self.error = error
 
@@ -35,6 +36,12 @@ class FakeAPI:
             raise self.error
         data = b"".join([chunk async for chunk in chunks])
         self.documents.append((owner, data, filename, caption))
+
+    async def send_media(self, kind, owner, chunks, filename, caption="", **options):
+        if self.error:
+            raise self.error
+        data = b"".join([chunk async for chunk in chunks])
+        self.media_sent.append((kind, data, filename, caption, options))
 
     async def call(self, method, **parameters):
         self.calls.append((method, parameters))
@@ -214,11 +221,14 @@ async def test_deleted_unknown_content_and_history(context):
         archive, update_id=4, text=None, future_message={"arbitrary": "<unknown>"}
     )
     rendered = history_text(await archive.history(message_id), 0, settings.timezone)
-    assert "future_message" in rendered and "<unknown>" in rendered
+    assert "экспорте" in rendered and "<unknown>" not in rendered
+    assert (await archive.history(message_id))["versions"][0]["payload"]["future_message"] == {
+        "arbitrary": "<unknown>"
+    }
     await commands.handle(command(f"/{message_id}", update_id=101))
     body = "".join(payload.get("text", "") for payload in await payloads(archive))
-    assert "&lt;unknown&gt;" in body
-    assert "кто удалил" in body
+    assert "&lt;unknown&gt;" not in body
+    assert "<blockquote>" in body and "&lt;blockquote&gt;" not in body
 
 
 def test_long_escaped_text_is_complete_and_entities_are_not_split():
@@ -298,7 +308,7 @@ async def test_file_integrity_failure_never_streams_to_api(context):
     assert (await jobs(archive))[-1]["state"] == "failed"
 
 
-async def test_protected_file_is_preserved_but_not_resent(context):
+async def test_protected_file_opens_for_owner_with_forwarding_protection(context):
     archive, settings, _, _ = context
     message_id = await store(archive, document={"file_id": "protected"}, has_protected_content=True)
     media_id = (await archive.message_media(message_id))[0]["id"]
@@ -315,7 +325,9 @@ async def test_protected_file_is_preserved_but_not_resent(context):
     sender = worker(context)
     await sender.run_once()
     assert sender.api.documents == []
-    assert "защитой содержимого" in sender.api.sent[0][1]
+    assert sender.api.sent == []
+    assert sender.api.media_sent[0][1] == b"protected bytes"
+    assert sender.api.media_sent[0][4]["protect_content"] is True
     assert (await archive.media(media_id))["state"] == "saved"
     assert path.is_file()
 
@@ -683,3 +695,97 @@ async def test_retention_invalidates_export_of_text_only_message(context, monkey
     sender = worker(context)
     await sender.run_once()
     assert sender.api.documents == []
+
+
+async def test_saved_photo_opens_as_photo_not_binary_document(context):
+    archive, settings, _, _ = context
+    message_id = await store(
+        archive, text=None, photo=[{"file_id": "f", "width": 100, "height": 200}]
+    )
+    media_id = (await archive.message_media(message_id))[0]["id"]
+    path = settings.data_dir / "objects" / "photo.enc"
+    writer = EncryptedWriter(path, KEY)
+    writer.write(b"photo bytes")
+    digest, size = writer.finish()
+    await archive.update_media(
+        media_id, state="saved", object_path="objects/photo.enc", sha256=digest, size=size
+    )
+    await archive.enqueue(
+        "notification", "view-photo", {"media_id": media_id, "message_id": message_id}
+    )
+    sender = worker(context)
+    await sender.run_once()
+    assert sender.api.documents == []
+    assert sender.api.media_sent[0][0] == "photo"
+    assert sender.api.media_sent[0][1] == b"photo bytes"
+
+
+async def test_deleted_saved_photo_is_one_native_card(context):
+    archive, settings, _, _ = context
+    message_id = await store(
+        archive, text=None, photo=[{"file_id": "f", "width": 100, "height": 200}]
+    )
+    media_id = (await archive.message_media(message_id))[0]["id"]
+    path = settings.data_dir / "objects" / "photo.enc"
+    writer = EncryptedWriter(path, KEY)
+    writer.write(b"photo bytes")
+    digest, size = writer.finish()
+    await archive.update_media(
+        media_id, state="saved", object_path="objects/photo.enc", sha256=digest, size=size
+    )
+    await deleted(archive)
+    sender = worker(context)
+    await sender.run_once()
+    assert sender.api.sent == []
+    assert len(sender.api.media_sent) == 1
+    kind, data, _, caption, options = sender.api.media_sent[0]
+    assert kind == "photo" and data == b"photo bytes"
+    assert "<b>Удалено</b>" in caption and "file_id" not in caption
+    assert options["formatted"] is True
+    assert options["reply_markup"]["inline_keyboard"][0][0]["text"] == "История"
+
+
+async def test_navigation_updates_existing_card_without_spamming_chat(context):
+    archive, _, _, commands = context
+    update = callback("start")
+    update["callback_query"]["message"].update(message_id=700, text="old menu")
+    await commands.handle(update)
+    sender = worker(context)
+    while await sender.run_once():
+        pass
+    edits = [parameters for method, parameters in sender.api.calls if method == "editMessageText"]
+    assert len(edits) == 1 and edits[0]["message_id"] == 700
+    assert "<b>Архив</b>" in edits[0]["text"]
+    assert sender.api.sent == []
+    await commands.handle(command("/start", update_id=101))
+    assert "edit_message_id" not in (await payloads(archive))[-1]
+
+
+@pytest.mark.parametrize("code", [400, 0])
+async def test_native_photo_fallback_only_after_definite_rejection(context, code):
+    archive, settings, _, _ = context
+    message_id = await store(archive, text=None, photo=[{"file_id": "f"}])
+    media_id = (await archive.message_media(message_id))[0]["id"]
+    path = settings.data_dir / "objects" / "photo.enc"
+    writer = EncryptedWriter(path, KEY)
+    writer.write(b"original photo bytes")
+    digest, size = writer.finish()
+    await archive.update_media(
+        media_id, state="saved", object_path="objects/photo.enc", sha256=digest, size=size
+    )
+    await archive.enqueue(
+        "notification", "view-photo", {"media_id": media_id, "message_id": message_id}
+    )
+
+    class RejectNative(FakeAPI):
+        async def send_media(self, *args, **kwargs):
+            raise TelegramError(code)
+
+    sender = worker(context, RejectNative())
+    await sender.run_once()
+    if code == 400:
+        assert sender.api.documents[0][1] == b"original photo bytes"
+        assert (await jobs(archive))[-1]["state"] == "done"
+    else:
+        assert sender.api.documents == []
+        assert (await jobs(archive))[-1]["state"] == "uncertain"

@@ -7,6 +7,7 @@ import logging
 import re
 import secrets
 import time
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
@@ -17,12 +18,16 @@ from spybot.async_utils import filesystem_call
 from spybot.crypto import verify_object
 from spybot.media import decrypted_stream, object_path
 from spybot.render import (
+    MEDIA_LABELS,
+    content,
     edit_visible,
     escaped_parts,
     event_text,
     history_text,
     media_status,
     preview,
+    primary_media,
+    safe,
     timestamp,
 )
 from spybot.telegram import TelegramError
@@ -91,6 +96,7 @@ HELP = """Личный архив Telegram
 class Commands:
     def __init__(self, archive, settings, operations):
         self.archive, self.settings, self.operations = archive, settings, operations
+        self._edit_target: ContextVar[int | None] = ContextVar("edit_target", default=None)
 
     def _owner(self, message: dict, sender: dict) -> bool:
         chat = message.get("chat")
@@ -111,10 +117,13 @@ class Commands:
         *,
         message_id: int | None = None,
         sensitive: bool = False,
+        formatted: bool = False,
     ) -> None:
-        parts = escaped_parts(text)
+        parts = [text] if formatted else escaped_parts(text)
         for part, value in enumerate(parts):
             payload: dict = {"text": value}
+            if len(parts) == 1 and self._edit_target.get() is not None:
+                payload["edit_message_id"] = self._edit_target.get()
             if sensitive:
                 payload["archive_sensitive"] = True
             if message_id is not None:
@@ -147,12 +156,14 @@ class Commands:
             if not isinstance(data, str) or len(data.encode()) > 64:
                 await self._reply(update_id, "Некорректная кнопка. Откройте /start.")
                 return
+            target = message.get("message_id") if isinstance(message.get("text"), str) else None
+            context_token = self._edit_target.set(target if type(target) is int else None)
             try:
                 await self._callback(update_id, data)
             except (ValueError, IndexError, ZoneInfoNotFoundError):
-                await self._reply(
-                    update_id, "Кнопка недействительна или устарела. Откройте /start."
-                )
+                await self._reply(update_id, "Кнопка устарела. Откройте /start.")
+            finally:
+                self._edit_target.reset(context_token)
             return
         message = update.get("message")
         if (
@@ -188,7 +199,14 @@ class Commands:
             if argument.startswith("bizChat") and re.fullmatch(r"bizChat-?\d{1,18}", argument):
                 await self._messages(update_id, "c", integer(argument[7:]), 0)
             else:
-                await self._reply(update_id, HELP, main_keyboard())
+                await self._reply(
+                    update_id,
+                    HELP
+                    if command == "/help"
+                    else "<b>Архив</b>\nСообщения, правки и удалённые — в одном месте.",
+                    main_keyboard(),
+                    formatted=command != "/help",
+                )
         elif command == "/status":
             await self._status(update_id)
         elif command == "/chats":
@@ -332,7 +350,14 @@ class Commands:
         parts = data.split(":")
         action = parts[0]
         if data in {"help", "start"}:
-            await self._reply(update_id, HELP, main_keyboard())
+            await self._reply(
+                update_id,
+                HELP
+                if data == "help"
+                else "<b>Архив</b>\nСообщения, правки и удалённые — в одном месте.",
+                main_keyboard(),
+                formatted=data != "help",
+            )
         elif data == "status":
             await self._status(update_id)
         elif action == "chats" and len(parts) == 2:
@@ -381,6 +406,22 @@ class Commands:
             await self._export(
                 update_id,
                 message_id=None if parts[1] == "all" else integer(parts[1], positive=True),
+            )
+        elif action == "details" and len(parts) == 2:
+            message_id = integer(parts[1], positive=True)
+            await self._reply(
+                update_id,
+                "Действия с сообщением",
+                keyboard(
+                    [
+                        [button("Все файлы и размеры", f"files:{message_id}:0")],
+                        [
+                            button("Экспорт", f"export:{message_id}"),
+                            button("Стереть…", f"delete:{message_id}"),
+                        ],
+                        [button("← Назад", f"history:{message_id}")],
+                    ]
+                ),
             )
         elif action == "delete" and len(parts) == 2:
             await self._delete_request(update_id, integer(parts[1], positive=True))
@@ -441,16 +482,18 @@ class Commands:
     async def _chats(self, update_id: int, page: int) -> None:
         async with self.operations.lock:
             rows = await self.archive.list_chats(limit=PAGE + 1, offset=page * PAGE)
-            text, buttons = f"Чаты · страница {page + 1}\n", []
+            text, buttons = f"<b>Чаты</b> · {page + 1}", []
             for row in rows[:PAGE]:
-                text += f"\n{preview(row.get('title') or str(row['chat_id']), 90)} · {row['chat_id']} · записей {row['messages']}"
-                buttons.append([button(f"Чат {row['chat_id']}", f"list:c:{row['chat_id']}:0")])
+                title = str(row.get("title") or row["chat_id"])
+                buttons.append(
+                    [button(f"{title[:45]} · {row['messages']}", f"list:c:{row['chat_id']}:0")]
+                )
             if not rows:
-                text += "\nЧатов пока нет. Проверьте подключение и выбранные чаты в Секретарском режиме. Старые сообщения не загружаются автоматически."
+                text += "\n\nПока пусто. Подключите бота в настройках Telegram → Чат-боты."
             if nav := self._navigation("chats", page, len(rows) > PAGE):
                 buttons.append(nav)
             buttons.append([button("Меню", "start")])
-            await self._reply(update_id, text, keyboard(buttons), sensitive=True)
+            await self._reply(update_id, text, keyboard(buttons), sensitive=True, formatted=True)
 
     async def _messages(self, update_id: int, mode: str, chat_id: int, page: int) -> None:
         async with self.operations.lock:
@@ -460,30 +503,35 @@ class Commands:
                 chat_id=chat_id if mode == "c" else None,
                 deleted_only=mode == "d",
             )
-            label = "Удалённые" if mode == "d" else f"Чат {chat_id}" if mode == "c" else "Архив"
-            text, buttons = f"{label} · страница {page + 1}\n", []
-            for row in rows[:PAGE]:
-                text += (
-                    f"\n#{row['id']} · {preview(row.get('chat_title') or str(row['chat_id']), 55)}"
-                    + (" · удалено" if row.get("deleted_at") is not None else "")
+            label = "Удалённые" if mode == "d" else "Архив чата" if mode == "c" else "Архив"
+            text, buttons = f"<b>{label}</b> · {page + 1}", []
+            for number, row in enumerate(rows[:PAGE], 1):
+                record = await self.archive.history(row["id"])
+                brief = (
+                    content(record["versions"][-1])
+                    if record and record["versions"]
+                    else "Содержимое недоступно"
                 )
-                text += (
-                    "\n"
-                    + preview(
-                        row.get("text") or row.get("caption") or "[Нет текста; откройте историю]",
-                        180,
-                    )
-                    + "\n"
+                title = str(row.get("chat_title") or row["chat_id"])
+                text += f"\n\n<b>{number}. {safe(title, 90)}</b>" + (
+                    " · удалено" if row.get("deleted_at") is not None else ""
                 )
-                buttons.append([button(f"История #{row['id']}", f"history:{row['id']}")])
+                text += "\n" + safe(brief, 180)
+                buttons.append(
+                    [
+                        button(
+                            f"{number}. {brief.replace(chr(10), ' ')[:45]}", f"history:{row['id']}"
+                        )
+                    ]
+                )
             if not rows:
-                text += "\nЗаписей на этой странице нет."
+                text += "\n\nПока пусто."
             if nav := self._navigation(f"list:{mode}:{chat_id}", page, len(rows) > PAGE):
                 buttons.append(nav)
             if mode == "c":
                 buttons.append([button("Настройки чата", f"settings:{chat_id}")])
             buttons.append([button("Меню", "start")])
-            await self._reply(update_id, text, keyboard(buttons), sensitive=True)
+            await self._reply(update_id, text, keyboard(buttons), sensitive=True, formatted=True)
 
     async def _history(self, update_id: int, message_id: int, index: int | None = None) -> None:
         async with self.operations.lock:
@@ -499,23 +547,21 @@ class Commands:
             if history["versions"]:
                 nav = []
                 if index:
-                    nav.append(button("← Предыдущая версия", f"history:{message_id}:{index - 1}"))
+                    nav.append(button("← Раньше", f"history:{message_id}:{index - 1}"))
                 if index + 1 < len(history["versions"]):
-                    nav.append(button("Следующая версия →", f"history:{message_id}:{index + 1}"))
+                    nav.append(button("Позже →", f"history:{message_id}:{index + 1}"))
                 if nav:
                     rows.append(nav)
-            if history["media"]:
-                rows.append([button(f"Файлы ({len(history['media'])})", f"files:{message_id}:0")])
-            rows.extend(
+            for media in primary_media(
+                history, history["versions"][index]["id"] if history["versions"] else None
+            ):
+                label = MEDIA_LABELS.get(media["kind"], "Файл")
+                rows.append([button(f"Открыть · {label}", f"media:{message_id}:{media['id']}")])
+            rows.append(
                 [
-                    [button("Экспорт записи", f"export:{message_id}")],
-                    [
-                        button(
-                            "Убрать закладку" if marked else "В закладки",
-                            f"bookmark:{message_id}:{0 if marked else 1}",
-                        )
-                    ],
-                    [button("Стереть локально…", f"delete:{message_id}"), button("Меню", "start")],
+                    button("★" if marked else "☆", f"bookmark:{message_id}:{0 if marked else 1}"),
+                    button("Ещё", f"details:{message_id}"),
+                    button("Архив", "list:a:0:0"),
                 ]
             )
             await self._reply(
@@ -524,6 +570,7 @@ class Commands:
                 keyboard(rows),
                 message_id=message_id,
                 sensitive=True,
+                formatted=True,
             )
 
     async def _files(self, update_id: int, message_id: int, page: int) -> None:
@@ -771,9 +818,31 @@ class NotificationWorker:
         # Reserve before sending: failures count towards Telegram's rate limit too.
         self._last_send = time.monotonic()
 
-    async def _text(self, text: str, markup: dict | None = None) -> None:
+    async def _text(
+        self, text: str, markup: dict | None = None, edit_message_id: int | None = None
+    ) -> None:
         await self._paced()
         options = {"reply_markup": markup} if markup else {}
+        if edit_message_id is not None:
+            self._send_attempted = True
+            try:
+                await self.api.call(
+                    "editMessageText",
+                    chat_id=self.settings.owner_id,
+                    message_id=edit_message_id,
+                    text=text,
+                    parse_mode="HTML",
+                    link_preview_options={"is_disabled": True},
+                    reply_markup=markup or {"inline_keyboard": []},
+                )
+                return
+            except TelegramError as error:
+                if error.category == "message_not_modified":
+                    return
+                if error.code != 400:
+                    raise
+                # An old/deleted card cannot be edited; replace it with a new response.
+                await self._paced()
         try:
             self._send_attempted = True
             await self.api.send_text(self.settings.owner_id, text, **options)
@@ -924,105 +993,176 @@ class NotificationWorker:
             text = event_text(
                 history, payload["event"], payload.get("version_id"), self.settings.timezone
             )
-            # A preview can expand after escaping. Separate jobs before sending so
-            # a later part never causes the successful first part to be replayed.
-            parts = escaped_parts(text)
-            markup = keyboard([[button("История и файлы", f"history:{payload['message_id']}")]])
-            if len(parts) > 1:
-                for index, part in enumerate(parts):
-                    await self.archive.enqueue(
-                        "notification",
-                        f"event-part:{job['id']}:{index}",
-                        {
-                            "text": part,
-                            "reply_markup": markup,
-                            "message_id": payload["message_id"],
-                            "event_part": True,
-                            "event_context": payload,
-                            "archive_sensitive": True,
+            rows = []
+            for media in primary_media(history, payload.get("version_id")):
+                label = MEDIA_LABELS.get(media["kind"], "Файл")
+                rows.append(
+                    [button(f"Открыть · {label}", f"media:{payload['message_id']}:{media['id']}")]
+                )
+            rows.append([button("История", f"history:{payload['message_id']}")])
+            attachments = primary_media(history, payload.get("version_id"))
+            latest = history["versions"][-1] if history["versions"] else None
+            if (
+                payload["event"] == "delete"
+                and len(attachments) == 1
+                and attachments[0]["state"] == "saved"
+                and attachments[0]["kind"] in {"photo", "video", "animation", "audio", "voice"}
+                and latest
+                and len(text.encode("utf-16-le")) // 2 < 900
+            ):
+                await self._document_locked(
+                    {
+                        **job,
+                        "payload": {
+                            "media_id": attachments[0]["id"],
+                            "caption_html": text,
+                            "reply_markup": keyboard([rows[-1]]),
                         },
-                    )
+                    }
+                )
             else:
-                await self._text(parts[0], markup)
+                await self._text(text, keyboard(rows))
             await self._finish(job)
 
     async def _document(self, job: dict) -> None:
-        payload = job["payload"]
         async with self.operations.lock:
-            await self._renew(job)
-            if "media_id" in payload:
-                media = await self.archive.media(payload["media_id"])
-                if not media or media["state"] != "saved" or not media.get("object_path"):
-                    await self._notice(
-                        "Файл пока не сохранён или недоступен. Проверьте историю; /retry повторяет безопасные ошибки загрузки."
-                    )
-                    return
-                history = await self.archive.history(media["message_fk"])
-                if not history:
-                    return
-                source = next(
-                    (
-                        version
-                        for version in history["versions"]
-                        if version["id"] == media["version_id"]
-                    ),
-                    None,
-                )
-                if source is None:
-                    return
-                if source["payload"].get("has_protected_content"):
-                    await self._notice(
-                        "Это вложение сообщения с защитой содержимого Telegram. Оно остаётся сохранённым в локальном архиве; повторная отправка через бота отключена."
-                    )
-                    return
-                path = object_path(self.settings.data_dir, media["object_path"])
-                name = str(
-                    ((media.get("metadata") or {}).get("file") or {}).get("file_name")
-                    or f"media-{media['id']}.bin"
-                )
-                filename = Path(name.replace("\\", "/")).name or f"media-{media['id']}.bin"
-                filename = (
-                    "".join(
-                        character
-                        for character in filename
-                        if ord(character) >= 32 and ord(character) != 127
-                    )[:200]
-                    or f"media-{media['id']}.bin"
-                )
-                caption = f"Сохранённое вложение #{media['id']}"
-            else:
-                root = (self.settings.data_dir / "exports").resolve()
-                relative = payload.get("export_path")
-                if not isinstance(relative, str):
-                    raise ValueError("invalid_export_path")
-                path = (self.settings.data_dir / relative).resolve()
-                if root not in path.parents or path.suffix != ".sba":
-                    raise ValueError("invalid_export_path")
-                filename, caption = "telegram-archive.zip", "Экспорт личного архива: JSONL + HTML"
-            if not path.is_file():
+            await self._document_locked(job)
+
+    async def _document_locked(self, job: dict) -> None:
+        payload = job["payload"]
+        await self._renew(job)
+        if "media_id" in payload:
+            media = await self.archive.media(payload["media_id"])
+            if not media or media["state"] != "saved" or not media.get("object_path"):
                 await self._notice(
-                    "Локальный файл недоступен или экспорт устарел после обслуживания/стирания. Повторите экспорт или проверьте /status."
+                    "Файл пока не сохранён или недоступен. Проверьте историю; /retry повторяет безопасные ошибки загрузки."
                 )
                 return
-            digest, size = await filesystem_call(verify_object, path, self.key)
-            if "media_id" in payload and (
-                (media.get("sha256") and media["sha256"] != digest)
-                or (media.get("size") is not None and media["size"] != size)
-            ):
-                raise ValueError("object_metadata_mismatch")
-            local = urlparse(self.settings.api_url).hostname != "api.telegram.org"
-            limit = 2_000_000_000 if local else 50_000_000
-            if size > limit:
-                await self._notice(
-                    f"Файл сохранён локально, но превышает лимит отправки {'локального' if local else 'облачного'} Bot API ({limit // 1_000_000} МБ). Используйте локальный экспорт или меньший объём."
-                )
+            history = await self.archive.history(media["message_fk"])
+            if not history:
                 return
-            await self._renew(job)
-            await self._paced()
-            self._send_attempted = True
+            source = next(
+                (
+                    version
+                    for version in history["versions"]
+                    if version["id"] == media["version_id"]
+                ),
+                None,
+            )
+            if source is None:
+                return
+            path = object_path(self.settings.data_dir, media["object_path"])
+            name = str(
+                ((media.get("metadata") or {}).get("file") or {}).get("file_name")
+                or f"media-{media['id']}.bin"
+            )
+            filename = Path(name.replace("\\", "/")).name or f"media-{media['id']}.bin"
+            filename = (
+                "".join(
+                    character
+                    for character in filename
+                    if ord(character) >= 32 and ord(character) != 127
+                )[:200]
+                or f"media-{media['id']}.bin"
+            )
+            caption = str(history["message"].get("chat_title") or "Сохранённое вложение")[:200]
+        else:
+            root = (self.settings.data_dir / "exports").resolve()
+            relative = payload.get("export_path")
+            if not isinstance(relative, str):
+                raise ValueError("invalid_export_path")
+            path = (self.settings.data_dir / relative).resolve()
+            if root not in path.parents or path.suffix != ".sba":
+                raise ValueError("invalid_export_path")
+            filename, caption = "telegram-archive.zip", "Экспорт личного архива: JSONL + HTML"
+        if not path.is_file():
+            await self._notice(
+                "Локальный файл недоступен или экспорт устарел после обслуживания/стирания. Повторите экспорт или проверьте /status."
+            )
+            return
+        digest, size = await filesystem_call(verify_object, path, self.key)
+        if "media_id" in payload and (
+            (media.get("sha256") and media["sha256"] != digest)
+            or (media.get("size") is not None and media["size"] != size)
+        ):
+            raise ValueError("object_metadata_mismatch")
+        local = urlparse(self.settings.api_url).hostname != "api.telegram.org"
+        limit = 2_000_000_000 if local else 50_000_000
+        if size > limit:
+            await self._notice(
+                f"Файл сохранён локально, но превышает лимит отправки {'локального' if local else 'облачного'} Bot API ({limit // 1_000_000} МБ). Используйте локальный экспорт или меньший объём."
+            )
+            return
+        await self._renew(job)
+        await self._paced()
+        self._send_attempted = True
+        kind = "document"
+        if "media_id" in payload:
+            media_path = (media.get("metadata") or {}).get("path", "")
+            if re.fullmatch(r"/photo/\d+", media_path) and size <= 10_000_000:
+                kind, filename = "photo", "photo.jpg"
+            elif media_path in {
+                "/video",
+                "/animation",
+                "/voice",
+                "/audio",
+                "/video_note",
+                "/sticker",
+            }:
+                kind = media_path[1:]
+                if filename.endswith(".bin"):
+                    extensions = {
+                        "video": "mp4",
+                        "animation": "mp4",
+                        "voice": "ogg",
+                        "audio": "mp3",
+                        "video_note": "mp4",
+                        "sticker": "webp",
+                    }
+                    filename = f"{kind}.{extensions[kind]}"
+        options = {}
+        if (
+            "media_id" in payload
+            and source is not None
+            and source["payload"].get("has_protected_content")
+        ):
+            options["protect_content"] = True
+        if payload.get("caption_html"):
+            caption = payload["caption_html"]
+            options.update({"formatted": True, "reply_markup": payload.get("reply_markup")})
+        if kind == "document" and not options:
             await self.api.send_document(
                 self.settings.owner_id, decrypted_stream(path, self.key), filename, caption
             )
+        else:
+            try:
+                await self.api.send_media(
+                    kind,
+                    self.settings.owner_id,
+                    decrypted_stream(path, self.key),
+                    filename,
+                    caption,
+                    **options,
+                )
+            except TelegramError as error:
+                # A definite native-media rejection permits a fresh document upload.
+                if error.code != 400 or kind == "document":
+                    raise
+                await self._renew(job)
+                await self._paced()
+                if options:
+                    await self.api.send_media(
+                        "document",
+                        self.settings.owner_id,
+                        decrypted_stream(path, self.key),
+                        filename,
+                        caption,
+                        **options,
+                    )
+                else:
+                    await self.api.send_document(
+                        self.settings.owner_id, decrypted_stream(path, self.key), filename, caption
+                    )
 
     async def run_once(self) -> bool:
         cooldown = await self.archive.get_setting("notification_cooldown_until", 0)
@@ -1066,7 +1206,11 @@ class NotificationWorker:
                     if "message_id" not in payload or await self.archive.history(
                         payload["message_id"]
                     ):
-                        await self._text(payload["text"], payload.get("reply_markup"))
+                        await self._text(
+                            payload["text"],
+                            payload.get("reply_markup"),
+                            payload.get("edit_message_id"),
+                        )
                     await self._finish(job)
             else:
                 raise ValueError("invalid_notification_payload")

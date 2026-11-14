@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import quote
@@ -48,7 +49,13 @@ class TelegramAPI:
                 if not result.get("ok"):
                     retry = (result.get("parameters") or {}).get("retry_after", 0)
                     description = str(result.get("description", "")).lower()
-                    category = "file_too_large" if "file is too big" in description else "telegram"
+                    category = (
+                        "file_too_large"
+                        if "file is too big" in description
+                        else "message_not_modified"
+                        if "message is not modified" in description
+                        else "telegram"
+                    )
                     raise TelegramError(
                         int(result.get("error_code", response.status)), int(retry), category
                     )
@@ -98,17 +105,50 @@ class TelegramAPI:
     async def send_document(
         self, chat_id: int, chunks: AsyncIterator[bytes], filename: str, caption: str = ""
     ) -> Any:
+        return await self.send_media("document", chat_id, chunks, filename, caption)
+
+    async def send_media(
+        self,
+        kind: str,
+        chat_id: int,
+        chunks: AsyncIterator[bytes],
+        filename: str,
+        caption: str = "",
+        *,
+        reply_markup: dict | None = None,
+        formatted: bool = False,
+        protect_content: bool = False,
+    ) -> Any:
+        methods = {
+            "photo": "sendPhoto",
+            "video": "sendVideo",
+            "animation": "sendAnimation",
+            "audio": "sendAudio",
+            "voice": "sendVoice",
+            "video_note": "sendVideoNote",
+            "sticker": "sendSticker",
+            "document": "sendDocument",
+        }
+        if kind not in methods:
+            raise ValueError("unsupported_media_kind")
         if not self._session:
             raise RuntimeError("API client is not open")
         form = aiohttp.FormData()
         form.add_field("chat_id", str(chat_id))
-        form.add_field("caption", caption[:1024])
-        form.add_field(
-            "document", chunks, filename=filename, content_type="application/octet-stream"
-        )
+        if caption and kind not in {"sticker", "video_note"}:
+            form.add_field("caption", caption)
+            if formatted:
+                form.add_field("parse_mode", "HTML")
+        if protect_content:
+            form.add_field("protect_content", "true")
+        if reply_markup:
+            form.add_field("reply_markup", json.dumps(reply_markup))
+        if kind == "video":
+            form.add_field("supports_streaming", "true")
+        form.add_field(kind, chunks, filename=filename, content_type="application/octet-stream")
         try:
             async with self._session.post(
-                self._base + "/sendDocument",
+                self._base + "/" + methods[kind],
                 data=form,
                 timeout=aiohttp.ClientTimeout(total=1800, sock_connect=15, sock_read=90),
             ) as response:

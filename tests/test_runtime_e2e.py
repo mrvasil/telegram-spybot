@@ -59,7 +59,15 @@ async def test_daemon_archives_and_downloads_before_delete_without_real_telegram
 
     async def api(request):
         method = request.match_info["method"]
-        parameters = await request.json()
+        if request.content_type.startswith("multipart/"):
+            form = await request.multipart()
+            parameters = {}
+            async for part in form:
+                parameters[part.name] = (
+                    bytes(await part.read()) if part.filename else await part.text()
+                )
+        else:
+            parameters = await request.json()
         calls.append((method, parameters))
         if method == "getMe":
             result = {"id": 123, "is_bot": True}
@@ -74,9 +82,9 @@ async def test_daemon_archives_and_downloads_before_delete_without_real_telegram
                 result = []
         elif method == "getFile":
             result = {"file_path": "photo.bin", "file_size": 7}
-        elif method == "sendMessage":
+        elif method in {"sendMessage", "sendPhoto"}:
             result = {"message_id": len(calls)}
-            if len([c for c in calls if c[0] == "sendMessage"]) >= 4:
+            if len([c for c in calls if c[0] in {"sendMessage", "sendPhoto"}]) >= 4:
                 delivered.set()
         else:
             result = True
