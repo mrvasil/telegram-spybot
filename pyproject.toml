@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "telegram-spybot"
+version = "2.0.0"
+description = "Durable personal Telegram Business archive"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "aiohttp>=3.12,<4",
+  "aiosqlite>=0.22,<0.23",
+  "sqlcipher3>=0.6.5,<0.7",
+  "cryptography>=46,<47",
+  "python-dotenv>=1.2,<2",
+]
+
+[project.scripts]
+spybot = "spybot.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.4,<10", "pytest-asyncio>=1.2,<2", "ruff>=0.14,<0.15", "mypy>=1.19,<2"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+check_untyped_defs = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spybot"]

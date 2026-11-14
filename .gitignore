@@ -175,3 +175,8 @@ cython_debug/
 
 media/
 messages.db
+# Personal archive v2: encrypted data, separate key files and execution notes
+data/
+secrets/
+*.key
+.superpowers/
