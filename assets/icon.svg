@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Spybot</title><desc id="desc">Две карточки сообщений и отметка сохранения на синем фоне.</desc>
+  <rect width="512" height="512" rx="120" fill="#2563EB"/>
+  <path d="M156 112h208a36 36 0 0 1 36 36v170a36 36 0 0 1-36 36H156a36 36 0 0 1-36-36V148a36 36 0 0 1 36-36Z" fill="#93C5FD"/>
+  <path d="M112 160h208a36 36 0 0 1 36 36v124a36 36 0 0 1-36 36H184l-64 48v-48h-8a36 36 0 0 1-36-36V196a36 36 0 0 1 36-36Z" fill="#F8FAFC"/>
+  <path d="M132 224h168M132 268h104" fill="none" stroke="#2563EB" stroke-width="20" stroke-linecap="round"/>
+  <circle cx="358" cy="356" r="70" fill="#0F2942" stroke="#2563EB" stroke-width="14"/>
+  <path d="m328 357 21 21 40-44" fill="none" stroke="#67E8F9" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

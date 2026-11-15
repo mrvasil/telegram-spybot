@@ -1,0 +1,32 @@
+name: Bug report
+description: Ошибка архивирования, интерфейса или запуска
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: "Не добавляйте токен, ключ, базу, переписку или полный .env. Уязвимости сообщайте по SECURITY.md."
+  - type: input
+    id: version
+    attributes:
+      label: Версия или коммит
+      placeholder: "2.0.1"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Как повторить
+      description: Шаги и вымышленный пример
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Что ожидалось и что произошло
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Окружение
+      description: ОС, Docker или uv, облачный или локальный Bot API; только обезличенные ошибки

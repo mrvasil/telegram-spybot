@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">Spybot — личный архив Telegram</title><desc id="desc">Сообщения, версии и вложения. Иллюстрация сохранённой переписки.</desc>
+  <rect width="1200" height="360" rx="24" fill="#0F2942"/>
+  <g transform="translate(64 64)">
+    <rect width="72" height="72" rx="20" fill="#2563EB"/>
+    <rect x="23" y="16" width="34" height="32" rx="6" fill="#93C5FD"/>
+    <path d="M18 24h27a6 6 0 0 1 6 6v17a6 6 0 0 1-6 6H30l-12 9v-9a6 6 0 0 1-6-6V30a6 6 0 0 1 6-6" fill="#F8FAFC"/>
+    <path d="M21 34h20M21 42h13" stroke="#2563EB" stroke-width="3" stroke-linecap="round"/>
+  </g>
+  <text x="160" y="120" fill="#F8FAFC" font-family="Avenir Next,Segoe UI,sans-serif" font-size="58" font-weight="650" letter-spacing="-2">Spybot</text>
+  <text x="64" y="200" fill="#F8FAFC" font-family="Segoe UI,sans-serif" font-size="32" font-weight="500">Личный архив Telegram</text>
+  <text x="64" y="246" fill="#B4CADD" font-family="Segoe UI,sans-serif" font-size="22">Сообщения. Версии. Вложения.</text>
+  <text x="64" y="306" fill="#67E8F9" font-family="ui-monospace,monospace" font-size="14" letter-spacing="2">YOUR MESSAGES, PRESERVED.</text>
+  <rect x="824" y="48" width="300" height="206" rx="20" fill="#234A68"/>
+  <rect x="776" y="84" width="300" height="206" rx="20" fill="#DDEBF5"/>
+  <rect x="728" y="120" width="300" height="206" rx="20" fill="#F8FAFC"/>
+  <circle cx="764" cy="156" r="7" fill="#2563EB"/>
+  <text x="784" y="163" fill="#0F2942" font-family="Segoe UI,sans-serif" font-size="19" font-weight="600">Сохранено</text>
+  <path d="M760 194h232" stroke="#D7E3ED"/>
+  <path d="M764 224h195M764 250h148" stroke="#7994AA" stroke-width="9" stroke-linecap="round"/>
+  <path d="m928 286 12 12 25-28" fill="none" stroke="#2563EB" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
