@@ -95,6 +95,56 @@ def primary_media(history: dict, version_id: int | None = None) -> list[dict]:
     return result
 
 
+def deletion_media(history: dict) -> list[dict]:
+    """One full-size photo per version, all other non-thumbnail files, no repeats."""
+    selected: list[dict] = []
+    seen: dict[tuple, int] = {}
+    for version in reversed(history["versions"]):
+        rows = [m for m in history["media"] if m["version_id"] == version["id"]]
+        primary = primary_media(history, version["id"])
+        photo_rows = [
+            m
+            for m in rows
+            if re.fullmatch(r"/photo/\d+", (m.get("metadata") or {}).get("path", ""))
+        ]
+        # If Telegram refused the original, still send the best available copy.
+        if photo_rows and not any(
+            m["state"] in {"saved", "pending"} for m in primary if m["kind"] == "photo"
+        ):
+            saved = [m for m in photo_rows if m["state"] == "saved"]
+            if saved:
+                best = max(
+                    saved,
+                    key=lambda m: (
+                        (m.get("metadata") or {}).get("file", {}).get("width", 0)
+                        * (m.get("metadata") or {}).get("file", {}).get("height", 0)
+                    ),
+                )
+                primary = [m for m in primary if m["kind"] != "photo"] + [best]
+        primary_ids = {m["id"] for m in primary}
+        for media in rows:
+            path = (media.get("metadata") or {}).get("path", "")
+            if media["id"] in primary_ids or (
+                media not in photo_rows
+                and not any(p in path.split("/") for p in ("thumbnail", "thumb", "cover"))
+            ):
+                identity = (media["kind"], media.get("file_unique_id") or media["file_id"])
+                if identity not in seen:
+                    seen[identity] = len(selected)
+                    selected.append(media)
+                elif selected[seen[identity]]["state"] != "saved" and media["state"] == "saved":
+                    selected[seen[identity]] = media
+    return selected
+
+
+def deletion_caption(history: dict, media: dict) -> str:
+    message = history["message"]
+    source = next(v for v in history["versions"] if v["id"] == media["version_id"])
+    title = safe(message.get("chat_title") or message["chat_id"], 160)
+    caption = source.get("caption") or source.get("text") or ""
+    return f"<b>Удалено</b> · {title}" + ("\n\n" + safe(caption, 650) if caption else "")
+
+
 def content(version: dict) -> str:
     raw = version.get("payload") or {}
     values = [version.get("text"), version.get("caption")]

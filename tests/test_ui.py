@@ -735,14 +735,16 @@ async def test_deleted_saved_photo_is_one_native_card(context):
     )
     await deleted(archive)
     sender = worker(context)
-    await sender.run_once()
+    while await sender.run_once():
+        pass
     assert sender.api.sent == []
     assert len(sender.api.media_sent) == 1
     kind, data, _, caption, options = sender.api.media_sent[0]
     assert kind == "photo" and data == b"photo bytes"
     assert "<b>Удалено</b>" in caption and "file_id" not in caption
     assert options["formatted"] is True
-    assert options["reply_markup"]["inline_keyboard"][0][0]["text"] == "История"
+    assert not options.get("reply_markup")
+    assert "Фото" not in caption
 
 
 async def test_navigation_updates_existing_card_without_spamming_chat(context):
@@ -789,3 +791,148 @@ async def test_native_photo_fallback_only_after_definite_rejection(context, code
     else:
         assert sender.api.documents == []
         assert (await jobs(archive))[-1]["state"] == "uncertain"
+
+
+async def save_test_media(context, media, data=b"attachment bytes"):
+    archive, settings, _, _ = context
+    relative = f"objects/test-{media['id']}.enc"
+    writer = EncryptedWriter(settings.data_dir / relative, KEY)
+    writer.write(data)
+    digest, size = writer.finish()
+    await archive.update_media(
+        media["id"], state="saved", object_path=relative, sha256=digest, size=size
+    )
+
+
+async def test_deletion_sends_every_attachment_without_buttons_and_waits_for_download(context):
+    archive, _, _, _ = context
+    message_id = await store(
+        archive,
+        text=None,
+        caption="long caption " * 300,
+        photo=[
+            {"file_id": "small", "width": 10, "height": 10},
+            {"file_id": "big", "width": 100, "height": 100},
+        ],
+        document={"file_id": "doc", "file_name": "report.pdf"},
+    )
+    rows = await archive.message_media(message_id)
+    photo = next(m for m in rows if m["file_id"] == "big")
+    document = next(m for m in rows if m["file_id"] == "doc")
+    await save_test_media(context, document)
+    await deleted(archive)
+    sender = worker(context)
+    for _ in range(8):
+        if not await sender.run_once():
+            break
+    assert len(sender.api.media_sent) + len(sender.api.documents) == 1
+    assert not any("Открыть" in str(item) for item in sender.api.sent)
+    await save_test_media(context, photo, b"full photo")
+    async with archive._transaction():
+        await archive._db.execute(
+            "UPDATE jobs SET available_at=0 WHERE kind='notification' AND state='pending'"
+        )
+    for _ in range(8):
+        if not await sender.run_once():
+            break
+    assert len(sender.api.media_sent) + len(sender.api.documents) == 2
+    assert any(item[0] == "photo" and item[1] == b"full photo" for item in sender.api.media_sent)
+
+
+async def test_deleted_media_bypasses_digest_and_quiet_but_honors_mute(context):
+    archive, _, _, _ = context
+    message_id = await store(archive, text=None, document={"file_id": "f"})
+    await save_test_media(context, (await archive.message_media(message_id))[0])
+    await archive.set_setting("digest_minutes", 60)
+    local = datetime.now(ZoneInfo("Europe/Moscow"))
+    await archive.set_setting(
+        "quiet",
+        {
+            "start": (local - timedelta(hours=1)).strftime("%H:%M"),
+            "end": (local + timedelta(hours=1)).strftime("%H:%M"),
+            "timezone": "Europe/Moscow",
+        },
+    )
+    await deleted(archive)
+    sender = worker(context)
+    await sender.run_once()  # durable fanout
+    await archive.set_setting("muted", True)
+    await sender.run_once()
+    assert sender.api.sent == [] and sender.api.media_sent == []
+    await archive.set_setting("muted", False)
+    await deleted(archive, update_id=4)
+    while await sender.run_once():
+        pass
+    assert len(sender.api.media_sent) == 1
+    assert sender.api.media_sent[0][0] == "document"
+    assert sender.api.sent == []
+
+
+async def test_failed_attachment_does_not_resend_successful_sibling(context):
+    archive, _, _, _ = context
+    message_id = await store(
+        archive, text=None, photo=[{"file_id": "p"}], document={"file_id": "d"}
+    )
+    for media in await archive.message_media(message_id):
+        await save_test_media(context, media, media["file_id"].encode())
+    await deleted(archive)
+
+    class RejectDocument(FakeAPI):
+        async def send_media(self, kind, *args, **kwargs):
+            if kind == "document":
+                raise TelegramError(503)
+            return await super().send_media(kind, *args, **kwargs)
+
+    sender = worker(context, RejectDocument())
+    while await sender.run_once():
+        pass
+    assert len(sender.api.media_sent) == 1
+    assert sender.api.media_sent[0][0] == "photo"
+    recovered = worker(context)
+    async with archive._transaction():
+        await archive._db.execute(
+            "UPDATE jobs SET available_at=0 WHERE kind='notification' AND state='pending'"
+        )
+    while await recovered.run_once():
+        pass
+    assert len(recovered.api.media_sent) == 1
+    assert recovered.api.media_sent[0][0] == "document"
+
+
+async def test_erasure_cancels_expanded_media_delivery(context):
+    archive, _, operations, _ = context
+    message_id = await store(archive, text=None, photo=[{"file_id": "p"}])
+    await save_test_media(context, (await archive.message_media(message_id))[0])
+    await deleted(archive)
+    sender = worker(context)
+    await sender.run_once()
+    await operations.erase(message_id)
+    assert not await sender.run_once()
+    assert sender.api.media_sent == [] and sender.api.sent == []
+
+
+async def test_deletion_uses_saved_photo_size_if_original_becomes_unavailable(context):
+    archive, _, _, _ = context
+    message_id = await store(
+        archive,
+        text=None,
+        photo=[
+            {"file_id": "small", "width": 10, "height": 10},
+            {"file_id": "large", "width": 100, "height": 100},
+        ],
+    )
+    media = await archive.message_media(message_id)
+    small = next(m for m in media if m["file_id"] == "small")
+    large = next(m for m in media if m["file_id"] == "large")
+    await save_test_media(context, small, b"available copy")
+    await deleted(archive)
+    sender = worker(context)
+    await sender.run_once()
+    await archive.update_media(large["id"], state="unavailable")
+    async with archive._transaction():
+        await archive._db.execute("UPDATE jobs SET state='failed' WHERE kind='media'")
+    while await sender.run_once():
+        pass
+    assert len(sender.api.media_sent) == 1
+    assert sender.api.media_sent[0][1] == b"available copy"
+    assert sender.api.sent == []

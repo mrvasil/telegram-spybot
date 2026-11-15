@@ -79,3 +79,39 @@ def contextual_messages(raw: Any, path: str = "") -> Iterator[tuple[str, dict]]:
 def quote_search(query: str) -> str:
     """Treat input as literal FTS phrases, never FTS operators or syntax."""
     return " AND ".join('"' + term.replace('"', '""') + '"' for term in query.split())
+
+
+def is_owner_edit(raw: dict, owner_id: int, *, edited: bool = False) -> bool:
+    author = raw.get("from") or {}
+    return (
+        isinstance(author, dict)
+        and type(author.get("id")) is int
+        and author["id"] == owner_id
+        and (edited or raw.get("edit_date") is not None)
+    )
+
+
+def omit_owner_edits(value: Any, owner_id: int, *, edited: bool = False) -> Any:
+    """Keep receipt/identity only for owner edits, including nested reply snapshots.
+
+    Called before durable intake; never mutate the caller's update. All other
+    payloads retain unknown fields. Existing archives are not purged retroactively.
+    """
+    if isinstance(value, dict):
+        if "message_id" in value and is_owner_edit(value, owner_id, edited=edited):
+            return {
+                **{
+                    k: value[k]
+                    for k in ("message_id", "business_connection_id", "date", "edit_date")
+                    if k in value
+                },
+                "from": {"id": owner_id},
+                "chat": {"id": (value.get("chat") or {}).get("id")},
+            }
+        return {
+            k: omit_owner_edits(v, owner_id, edited=k == "edited_business_message")
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [omit_owner_edits(item, owner_id) for item in value]
+    return value

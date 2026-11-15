@@ -1,7 +1,7 @@
 services:
   spybot:
     build: .
-    image: telegram-spybot:2.0.1
+    image: telegram-spybot:2.0.2
     restart: unless-stopped
     user: "${RUN_UID:-1000}:${RUN_GID:-1000}"
     init: true

@@ -497,3 +497,61 @@ async def test_owner_reply_recovers_previously_unseen_file(archive):
     assert history["versions"][0]["kind"] == "context"
     assert history["versions"][0]["payload"]["has_protected_content"] is True
     assert history["media"][0]["file_id"] == "previously-unseen"
+
+
+async def test_owner_edits_are_omitted_from_raw_versions_media_and_search(archive):
+    original = message(1, **{"from": {"id": 99}})
+    edit = message(
+        2,
+        edit=True,
+        text="OWNER_EDIT_SENTINEL",
+        document={"file_id": "OWN_EDIT_FILE"},
+        **{"from": {"id": 99}},
+    )
+    await apply(archive, original, edit)
+    assert await archive.get_offset() == 3
+    history = await archive.history(1)
+    assert len(history["versions"]) == 1
+    assert history["media"] == []
+    assert "OWNER_EDIT_SENTINEL" not in json.dumps(history)
+    assert await archive.search("OWNER_EDIT_SENTINEL") == []
+    async with archive._lock:
+        raw = await archive._all("SELECT payload FROM inbox")
+        notifications = await archive._all("SELECT * FROM jobs WHERE kind='notification'")
+    assert "OWNER_EDIT_SENTINEL" not in json.dumps(raw)
+    assert "OWN_EDIT_FILE" not in json.dumps(raw)
+    assert notifications == []
+    assert edit["edited_business_message"]["text"] == "OWNER_EDIT_SENTINEL"
+
+
+async def test_edited_owner_reply_context_is_not_archived_but_other_edits_are(archive):
+    context = message(1, text="OWN_CONTEXT_EDIT", edit_date=120, **{"from": {"id": 99}})[
+        "business_message"
+    ]
+    update = message(
+        2, message_id=2, text="other", reply_to_message=context, **{"from": {"id": 42}}
+    )
+    await apply(
+        archive,
+        update,
+        message(3, message_id=2, edit=True, text="other changed", **{"from": {"id": 42}}),
+    )
+    rows = await archive.list_messages()
+    assert len(rows) == 1
+    history = await archive.history(rows[0]["id"])
+    assert len(history["versions"]) == 2
+    assert "OWN_CONTEXT_EDIT" not in json.dumps(history)
+
+
+async def test_notification_fanout_is_atomic_idempotent_and_fenced(archive):
+    await archive.enqueue("notification", "parent", {"event": "delete", "message_id": 1})
+    job = await archive.claim_job("notification")
+    payloads = [{"media_id": 1, "message_id": 1}, {"media_id": 2, "message_id": 1}]
+    assert not await archive.expand_notification({**job, "attempts": job["attempts"] + 1}, payloads)
+    assert await archive.expand_notification(job, payloads)
+    assert not await archive.expand_notification(job, payloads)
+    async with archive._lock:
+        rows = await archive._all("SELECT * FROM jobs")
+    assert len(rows) == 3
+    assert rows[0]["state"] == "done"
+    assert [json.loads(row["payload"])["media_id"] for row in rows[1:]] == [1, 2]

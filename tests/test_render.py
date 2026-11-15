@@ -79,3 +79,28 @@ def test_long_untrusted_card_is_bounded_balanced_and_cannot_inject_html():
     assert not parser.stack
     assert len(text.encode("utf-16-le")) // 2 < 3900
     assert "<script>" not in text
+
+
+def test_deletion_selects_distinct_files_across_versions_without_thumbnails():
+    from spybot.render import deletion_media
+
+    history = record()
+    history["versions"].append({"id": 2})
+
+    def media(id, version, file_id, path, state="saved"):
+        return {
+            "id": id,
+            "version_id": version,
+            "file_id": file_id,
+            "kind": "document",
+            "state": state,
+            "metadata": {"path": path},
+        }
+
+    history["media"] = [
+        media(1, 1, "same", "/document"),
+        media(2, 2, "same", "/document", "pending"),
+        media(3, 1, "old", "/future_file"),
+        media(4, 2, "thumb", "/document/thumbnail"),
+    ]
+    assert {m["id"] for m in deletion_media(history)} == {1, 3}

@@ -20,6 +20,8 @@ from spybot.media import decrypted_stream, object_path
 from spybot.render import (
     MEDIA_LABELS,
     content,
+    deletion_caption,
+    deletion_media,
     edit_visible,
     escaped_parts,
     event_text,
@@ -907,9 +909,13 @@ class NotificationWorker:
             )
             if index is None:
                 return None, 0
+            if (versions[index]["payload"].get("from") or {}).get("id") == self.settings.owner_id:
+                return None, 0
             threshold = await self.archive.get_setting("ignore_threshold", 0)
             if not edit_visible(versions[index - 1] if index else None, versions[index], threshold):
                 return None, 0
+        if event == "delete" and history["media"]:
+            return history, 0  # Deleted attachments are delivered immediately.
         now = time.time()
         due = quiet_until(await self.archive.get_setting("quiet"), now) or 0
         digest = await self.archive.get_setting("digest_minutes", 0)
@@ -936,7 +942,7 @@ class NotificationWorker:
             await self._defer(job, due)
             return
         digest = await self.archive.get_setting("digest_minutes", 0)
-        if digest:
+        if digest and not (job["payload"]["event"] == "delete" and history["media"]):
             extra = await self.archive.claim_notification_events(limit=19, lease_seconds=3600)
             jobs.extend(extra)
             ready = []
@@ -993,40 +999,60 @@ class NotificationWorker:
             text = event_text(
                 history, payload["event"], payload.get("version_id"), self.settings.timezone
             )
-            rows = []
-            for media in primary_media(history, payload.get("version_id")):
-                label = MEDIA_LABELS.get(media["kind"], "Файл")
-                rows.append(
-                    [button(f"Открыть · {label}", f"media:{payload['message_id']}:{media['id']}")]
-                )
-            rows.append([button("История", f"history:{payload['message_id']}")])
-            attachments = primary_media(history, payload.get("version_id"))
-            latest = history["versions"][-1] if history["versions"] else None
-            if (
-                payload["event"] == "delete"
-                and len(attachments) == 1
-                and attachments[0]["state"] == "saved"
-                and attachments[0]["kind"] in {"photo", "video", "animation", "audio", "voice"}
-                and latest
-                and len(text.encode("utf-16-le")) // 2 < 900
-            ):
-                await self._document_locked(
+            attachments = deletion_media(history) if payload["event"] == "delete" else []
+            if attachments:
+                deliveries = [
                     {
-                        **job,
-                        "payload": {
-                            "media_id": attachments[0]["id"],
-                            "caption_html": text,
-                            "reply_markup": keyboard([rows[-1]]),
-                        },
+                        "media_id": media["id"],
+                        "message_id": payload["message_id"],
+                        "deletion_media": True,
+                        "event_context": payload,
                     }
-                )
-            else:
-                await self._text(text, keyboard(rows))
+                    for media in attachments
+                ]
+                if not await self.archive.expand_notification(job, deliveries):
+                    raise _NoLease
+                return
+            rows = [[button("История", f"history:{payload['message_id']}")]]
+            await self._text(text, keyboard(rows))
             await self._finish(job)
 
-    async def _document(self, job: dict) -> None:
+    async def _document(self, job: dict) -> bool:
         async with self.operations.lock:
+            if job["payload"].get("deletion_media"):
+                payload = job["payload"]
+                history, _ = await self._policy(
+                    {**job, "payload": payload["event_context"]}, schedule=False
+                )
+                if history is None:
+                    return True
+                media = await self.archive.media(payload["media_id"])
+                if media is None:
+                    return True
+                if media["state"] != "saved" and (
+                    media["state"] == "pending"
+                    or await self.archive.media_download_pending(media["id"])
+                ):
+                    await self._defer(job, time.time() + 2)
+                    return False
+                if media["state"] != "saved" and media["kind"] == "photo":
+                    alternatives = [
+                        m
+                        for m in deletion_media(history)
+                        if m["kind"] == "photo"
+                        and m["version_id"] == media["version_id"]
+                        and m["state"] == "saved"
+                    ]
+                    if alternatives:
+                        media = alternatives[0]
+                payload = {
+                    **payload,
+                    "media_id": media["id"],
+                    "caption_html": deletion_caption(history, media),
+                }
+                job = {**job, "payload": payload}
             await self._document_locked(job)
+            return True
 
     async def _document_locked(self, job: dict) -> None:
         payload = job["payload"]
@@ -1035,7 +1061,9 @@ class NotificationWorker:
             media = await self.archive.media(payload["media_id"])
             if not media or media["state"] != "saved" or not media.get("object_path"):
                 await self._notice(
-                    "Файл пока не сохранён или недоступен. Проверьте историю; /retry повторяет безопасные ошибки загрузки."
+                    "Telegram не предоставил файл удалённого сообщения; отправить его не удалось."
+                    if payload.get("deletion_media")
+                    else "Файл пока не сохранён или недоступен. Проверьте историю; /retry повторяет безопасные ошибки загрузки."
                 )
                 return
             history = await self.archive.history(media["message_fk"])
@@ -1186,8 +1214,8 @@ class NotificationWorker:
             elif payload.get("event") in {"edit", "delete"}:
                 await self._event(job, jobs)
             elif "media_id" in payload or "export_path" in payload:
-                await self._document(job)
-                await self._finish(job)
+                if await self._document(job):
+                    await self._finish(job)
             elif isinstance(payload.get("text"), str):
                 async with self.operations.lock:
                     await self._renew(job)

@@ -12,7 +12,15 @@ from typing import Any
 import aiosqlite
 import sqlcipher3
 
-from spybot.normalize import chat_title, collect_media, contextual_messages, quote_search, sender
+from spybot.normalize import (
+    chat_title,
+    collect_media,
+    contextual_messages,
+    is_owner_edit,
+    omit_owner_edits,
+    quote_search,
+    sender,
+)
 from spybot.schema import SCHEMA, SCHEMA_VERSION
 
 
@@ -143,6 +151,7 @@ class Archive:
             highest = None
             suppressed = await self._suppression_set()
             for update in updates:
+                update = omit_owner_edits(update, self.owner_id)
                 update_id = update["update_id"]
                 if not isinstance(update_id, int) or isinstance(update_id, bool):
                     raise ValueError("invalid_update_id")
@@ -237,8 +246,14 @@ class Archive:
             raise ForeignConnection("foreign_business_connection")
 
     async def apply_update(self, update: dict, *, notify: bool = True) -> None:
+        update = omit_owner_edits(update, self.owner_id)
         update_id = update["update_id"]
         async with self._transaction():
+            update = _sanitize_payload(update, await self._suppression_set())
+            await self._db.execute(
+                "UPDATE inbox SET payload=? WHERE update_id=? AND state='pending'",
+                (_json(update), update_id),
+            )
             if await self._one("SELECT 1 FROM applied_events WHERE update_id=?", (update_id,)):
                 await self._mark_processed(update_id)
                 return
@@ -288,6 +303,10 @@ class Archive:
                 raise UnknownConnection(connection_id)
             if connection["owner_id"] != self.owner_id:
                 await self._mark_processed(update_id, ignored=True)
+                return
+            if key == "edited_business_message" and is_owner_edit(raw, self.owner_id, edited=True):
+                await self._mark_processed(update_id, ignored=True)
+                await self._db.execute("INSERT INTO applied_events VALUES(?)", (update_id,))
                 return
             now = time.time()
             if key == "deleted_business_messages":
@@ -364,6 +383,8 @@ class Archive:
     async def _save_version(
         self, connection_id: str, raw: dict, kind: str, update_id: int, event_key: str, now: float
     ) -> tuple[int, int] | None:
+        if is_owner_edit(raw, self.owner_id, edited=kind == "edit"):
+            return None
         internal_id = await self._message(connection_id, raw["chat"], raw["message_id"])
         if internal_id is None:
             return None
@@ -454,6 +475,32 @@ class Archive:
         async with self._transaction():
             return await self._enqueue(kind, key, payload)
 
+    async def expand_notification(self, job: dict, payloads: list[dict]) -> bool:
+        """Atomically replace an event with independent, deduplicated deliveries."""
+        async with self._transaction():
+            owned = await self._one(
+                "SELECT 1 FROM jobs WHERE id=? AND kind='notification' AND state='running' AND attempts=? AND lease_until>?",
+                (job["id"], job["attempts"], time.time()),
+            )
+            if not owned:
+                return False
+            for index, payload in enumerate(payloads):
+                await self._enqueue("notification", f"delivery:{job['id']}:{index}", payload)
+            await self._db.execute(
+                "UPDATE jobs SET state='done',lease_until=NULL,last_error=NULL WHERE id=?",
+                (job["id"],),
+            )
+            return True
+
+    async def media_download_pending(self, media_id: int) -> bool:
+        async with self._lock:
+            return bool(
+                await self._one(
+                    "SELECT 1 FROM jobs WHERE kind='media' AND json_extract(payload,'$.media_id')=? AND state IN ('pending','running')",
+                    (media_id,),
+                )
+            )
+
     async def claim_job(self, kind: str, lease_seconds: float = 300) -> dict | None:
         rows = await self._claim_jobs(kind, 1, lease_seconds, event_only=False)
         return rows[0] if rows else None
@@ -479,7 +526,10 @@ class Archive:
             )
             rows = await self._all(
                 "SELECT * FROM jobs WHERE kind=? AND state='pending' AND available_at<=? "
-                "AND (?=0 OR json_extract(payload,'$.event') IN ('edit','delete')) "
+                "AND (?=0 OR (json_extract(payload,'$.event') IN ('edit','delete') "
+                "AND NOT (json_extract(payload,'$.event')='delete' AND EXISTS ("
+                "SELECT 1 FROM media d JOIN versions v ON v.id=d.version_id "
+                "WHERE v.message_fk=json_extract(jobs.payload,'$.message_id'))))) "
                 "ORDER BY CASE WHEN kind='media' THEN COALESCE(json_extract(payload,'$.priority'),100) + MIN(300,CAST((?-available_at)/30 AS INTEGER)) ELSE 0 END DESC,id LIMIT ?",
                 (kind, now, event_only, now, limit),
             )
